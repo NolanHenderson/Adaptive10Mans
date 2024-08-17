@@ -12,10 +12,11 @@ from discord.utils import get
 from replit.object_storage import Client
 
 client = Client()  # Create a client instance
-#queue_pc = {}
-#queue_console = {}
-#queue_dict = {}
+EU_QUEUE_CHANNEL_ID = 1274045870223921262
+US_QUEUE_CHANNEL_ID = 1274045870568112243
 
+last_update_time = {"us": time.time(), "eu": time.time()}
+RATE_LIMIT_PERIOD = 10  # 10 seconds
 role_dict = {}
 full_queue = None
 match_size = 10
@@ -33,7 +34,13 @@ list_of_ranks = [
 list_of_systems = ["PC", "PS", "Xbox"]
 
 list_of_major_regions = ["ja", "so", "ua", "eu", "us", "br", "au", "af"]
-queue_regions = {region: {'pc': {}, 'console': {}} for region in list_of_major_regions}
+queue_regions = {
+    region: {
+        'pc': {},
+        'console': {}
+    }
+    for region in list_of_major_regions
+}
 
 intents = discord.Intents.default()
 intents.members = True  # Enable member intents (to see members in guilds)
@@ -106,6 +113,37 @@ class Player:
 
 
 # Functions:
+async def update_channel_name(region, new_name: str):
+    global last_update_time
+    # Determine the correct channel based on the region
+    print(f"region recieved: {region}")
+    if region.lower() == "us":
+        channel = bot.get_channel(US_QUEUE_CHANNEL_ID)
+        new_name = "us-queue-" + str(new_name)
+    elif region.lower() == "eu":
+        channel = bot.get_channel(EU_QUEUE_CHANNEL_ID)
+        new_name = "eu-queue-" + str(new_name)
+    else:
+        return
+    # Calculate time since the last update for this region
+    time_since_last_update = time.time() - last_update_time[region.lower()]
+    # If we're within the minimum time between updates, wait before proceeding
+    if time_since_last_update < RATE_LIMIT_PERIOD:
+        wait_time = RATE_LIMIT_PERIOD - time_since_last_update
+        print(
+            f"Rate limit hit for {region.upper()}. Waiting {wait_time:.2f} seconds."
+        )
+        await asyncio.sleep(wait_time)
+    # Update the channel's name
+    await channel.edit(name=new_name)
+    print(f"Channel name updated to: {new_name}")
+    # Update the last update time
+    last_update_time[region.lower()] = time.time()
+    # Update the channel's name
+    await channel.edit(name=new_name)
+    print(f"Channel name updated to: {new_name}")
+
+
 def check_profile(filename, user):
     try:
         # Try to load the player profile from the JSON file
@@ -124,6 +162,16 @@ def check_profile(filename, user):
 
 def generate_match_id():
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+
+
+# Function to get the queue based on region
+def get_queue(region, server_id):
+    queues = queue_regions[region]
+    if region == 'eu':
+        queue = queues['pc'] if 'pc' in system else queues['console']
+    elif region == 'us':
+        queue = queues['pc'] if 'pc' in system else queues['console']
+    return queue
 
 
 def best_team_partition(players, match_size):
@@ -169,8 +217,6 @@ def best_team_partition(players, match_size):
 
 
 def make_a_match(cxt, roster, server_id):
-    Match_Made = True
-    #roster is a list of discord users
     players = []
     for dis in roster:
         try:
@@ -181,27 +227,22 @@ def make_a_match(cxt, roster, server_id):
 
     Team_1, Team_2, Discarded = best_team_partition(players, match_size)
 
-    for user in roster:
-        members.append(user)
+    # Return the members for this match and clear them from the queue
+    members = [dis for dis in roster if dis in Team_1 or dis in Team_2]
 
-    if len(members) < match_size:
-        missing = match_size - len(members)
-        for _ in range(missing):
-            members.append(members[0])
-
-    if Match_Made:
-        return members
-    else:
-        return []
+    return members, Team_1, Team_2, Discarded
 
 
 # Bot Commands
 
 
-@bot.command(name='setup_profile', aliases=['setup profile', 'setup'])
+@bot.command(name='setup_profile', aliases=['setup profile', 'setup'], help='Make a user profile')
 async def setup_profiles(ctx):
     guild = ctx.guild
     new_user = ctx.author
+    if guild is None:
+        await ctx.send("This command can only be used in a server.")
+        return
 
     async def ask_user_for_input(member, question, input_type=str, timeout=60):
         await member.send(question)
@@ -289,7 +330,7 @@ async def on_ready():
 
 
 # Create a group of commands under !Queue
-@bot.group()
+@bot.group(name="Queue", aliases=["q"], help='join, leave, list')
 async def Queue(ctx):
     if ctx.invoked_subcommand is None:
         await ctx.send("Please use a valid subcommand: Join, Leave, or List")
@@ -302,74 +343,87 @@ async def Join(ctx, role: Optional[str] = "Flex"):
     user = ctx.author
     role_dict[user] = role
     print(role)
-
     # Fetch player's system and region
     player = check_profile(server_id, user)
     if not player:
         await ctx.send("No user profile, make one with !setup_profile")
         return
-
     system = player.system.lower()
     major_region = player.region[:2].lower()
     if major_region not in list_of_major_regions:
-        await ctx.send("Invalid region in profile. Please update your profile with a valid region.")
+        await ctx.send(
+            "Invalid region in profile. Please update your profile with a valid region."
+        )
         return
-
     # Determine the correct queue
     queues = queue_regions[major_region]
     queue = queues['pc'] if 'pc' in system else queues['console']
-
     # Create the queue if it doesn't exist
     if server_id not in queue:
         queue[server_id] = []
-
     # Add user to the queue if not already in it
     if user not in queue[server_id]:
         queue[server_id].append(user)
-        await ctx.send(f"{user.mention} has joined the queue for {system} players in {major_region.upper()} region!")
-    else:
-        await ctx.send(f"{user.mention}, you're already in the queue for {player.region} region.")
 
+        await discord.utils.get(
+            ctx.guild.text_channels, name="bot-commands"
+        ).send(
+            f"{user.mention} has joined the queue for {system} players in {major_region.upper()} region!"
+        )
+    else:
+        await discord.utils.get(
+            ctx.guild.text_channels, name="bot-commands"
+        ).send(
+            f"{user.mention}, you're already in the queue for {player.region} region."
+        )
+    # Update queue channel names
+    await update_channel_name(major_region, str(len(queue[server_id])))
     # Try to make a match
     if len(queue[server_id]) >= match_size:
-        await ctx.send('making a match')
-        members = make_a_match(ctx, queue[server_id], server_id)
+        await discord.utils.get(ctx.guild.text_channels,
+                                name="bot-commands").send('making a match')
+        members, Team_1, Team_2, Discarded = make_a_match(
+            ctx, queue[server_id], server_id)
         if members:
-            bot.loop.create_task(
-                create_lobby(ctx, "Blue Team DEF", "Orange Team ATK", members))
-        queue[server_id] = [
-            user for user in queue.get(server_id, []) if user not in members
-        ]
+            await create_lobby(ctx, "Blue Team DEF", "Orange Team ATK",
+                               members)
+            queue[server_id] = [
+                user for user in queue.get(server_id, [])
+                if user not in members
+            ]
 
-# Subcommand for leaving the queue
+
 @Queue.command(name="Leave", aliases=['leave', 'l', 'L', 'LEAVE'])
 async def Leave(ctx):
     server_id = ctx.guild.id
     user = ctx.author
-
     # Fetch player's region
     player = check_profile(server_id, user)
     if not player:
         await ctx.send("No user profile, make one with !setup_profile")
         return
-
     major_region = player.region[:2].lower()
     if major_region not in list_of_major_regions:
-        await ctx.send("Invalid region in profile. Please update your profile with a valid region.")
+        await ctx.send(
+            "Invalid region in profile. Please update your profile with a valid region."
+        )
         return
-
     left_queue = False
-
     # Check which queue the player is in and remove them
     for system in ['pc', 'console']:
         queue = queue_regions[major_region][system]
         if server_id in queue and user in queue[server_id]:
             queue[server_id].remove(user)
-            await ctx.send(f"{user.mention} has left the {system.upper()} queue for the {player.region} region.")
+            await ctx.send(
+                f"{user.mention} has left the {system.upper()} queue for the {player.region} region."
+            )
             left_queue = True
-
+            await update_channel_name(major_region, str(len(queue[server_id])))
     if not left_queue:
-        await ctx.send(f"{user.mention}, you are not in any queue for the {player.region} region.")
+        await ctx.send(
+            f"{user.mention}, you are not in any queue for the {player.region} region."
+        )
+
 
 # Subcommand for listing the queue
 @Queue.command(name="List", aliases=['list', 'LIST'])
@@ -381,7 +435,8 @@ async def ListQ(ctx):
     for region, systems in queue_regions.items():
         for system, queue in systems.items():
             if server_id in queue and queue[server_id]:
-                queue_list = "\n".join([str(item) for item in queue[server_id]])
+                queue_list = "\n".join(
+                    [str(item) for item in queue[server_id]])
                 response += f"{system.upper()} Queue for {region}:\n{queue_list}\n{len(queue[server_id])}/{match_size}\n\n"
                 queues_with_players.append(f"{region} - {system.upper()}")
 
@@ -394,10 +449,7 @@ async def ListQ(ctx):
 # Match Reporting
 @bot.command()
 async def create_lobby(ctx, team_a: str, team_b: str, members: list):
-    # Create the poll message
-    players = []
-    for member in members:
-        players.append(member.name)
+    # Create the lobby with unique match ID
     match_ID = generate_match_id()
     poll_message = await ctx.send(
         "Match ID: " + match_ID + "\n"
@@ -412,7 +464,7 @@ async def create_lobby(ctx, team_a: str, team_b: str, members: list):
         f"🟠{members[6].mention}\n"
         f"🟠{members[7].mention}\n"
         f"🟠{members[8].mention}\n"
-        f"🟠{members[1].mention}\n\n"
+        f"🟠{members[9].mention}\n\n"
         f"Indicate the winner!\n🔵 {team_a} vs. 🟠 {team_b}\n\n"
         "React with 🔵 or 🟠")
 
@@ -421,17 +473,14 @@ async def create_lobby(ctx, team_a: str, team_b: str, members: list):
     await poll_message.add_reaction("🟠")
 
     def check(reaction, user):
-        return (
-            user != bot.user and str(reaction.emoji) in ["🔵", "🟠"]
-            and reaction.message.id == poll_message.id and
-            True  #user.id in members  # Check if the user is in the allowed voters list
-        )
+        return (user != bot.user and str(reaction.emoji) in ["🔵", "🟠"]
+                and reaction.message.id == poll_message.id)
 
     try:
         # Wait for a certain amount of time (e.g., 60 seconds) or until one team has 6 votes
         while True:
             reaction, user = await bot.wait_for("reaction_add",
-                                                timeout=7200.0,
+                                                timeout=14400,
                                                 check=check)
 
             # Fetch the message again to get updated reaction counts
@@ -463,7 +512,7 @@ def get_player_file_path(user_id):
     return os.path.join(player_data_dir, f"{user_id}.json")
 
 
-@bot.command(name='assign_system_roles')
+@bot.command(name='assign_system_roles', help ='defunct')
 @commands.has_permissions(administrator=True)
 async def assign_system_roles(ctx):
     print("command called")
@@ -480,17 +529,77 @@ async def assign_system_roles(ctx):
                 system = player.system
                 print(system)
                 if system:
-                    roles = system.split()  # In case multiple systems are provided (e.g., "PC PS")
+                    roles = system.split(
+                    )  # In case multiple systems are provided (e.g., "PC PS")
                     for role_name in roles:
                         role = get(guild.roles, name=role_name)
                         if role:
                             await member.add_roles(role)
-                            await ctx.send(f"Assigned role {role_name} to {member.name}")
+                            await ctx.send(
+                                f"Assigned role {role_name} to {member.name}")
                         else:
-                            await ctx.send(f"Role {role_name} not found on the server.")
+                            await ctx.send(
+                                f"Role {role_name} not found on the server.")
             else:
                 await ctx.send(f"No profile found for {member.name}")
 
 
-# Run the bot with your token
+@bot.command(name='clear', help='Clear a queue')
+@commands.has_permissions(administrator=True)
+async def clear_input(ctx, *, arg: str):
+    user = ctx.author
+    try:
+        regions = list_of_major_regions
+        systems = ['pc', 'console']
+
+        if arg == "all":
+            # Clear all queues
+            for region in regions:
+                for system in systems:
+                    queue_regions[region][system] = {}
+            await ctx.send(f"All queues have been cleared.")
+
+        else:
+            input_text_lower = arg.lower()
+            if input_text_lower in regions:
+                # Clear queues for a specific region
+                for system in systems:
+                    queue_regions[input_text_lower][system] = {}
+                await ctx.send(
+                    f"All queues for the {arg} region have been cleared.")
+
+            else:
+                await ctx.send(
+                    f"{user.mention}, your input '{arg}' is not recognized. Please try again with a valid region or 'all'."
+                )
+
+        for region in regions:
+            await update_channel_name(region, "0")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        await ctx.send(f"An error occurred: {e}. Please try again.")
+
+    @clear_input.error
+    async def clear_input_error(ctx, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send(
+                f"{ctx.author.mention}, you do not have permission to use this command."
+            )
+        else:
+            await ctx.send(f"An error occurred: {str(error)}")
+
+
+@bot.command(name='feature-request',
+             aliases=['fr', 'request', 'suggest'],
+             help='Submit a feature request')
+async def feature_request(ctx, *, arg):
+    user = ctx.author
+    await ctx.send("Feature request submitted! Thank you for your feedback.")
+    await discord.utils.get(
+        ctx.guild.text_channels,
+        name="dev").send(f"{user.name} suggessted: \n {arg}")
+
+
+# Run the bot
 bot.run(os.environ['DISCORD_KEY'])
