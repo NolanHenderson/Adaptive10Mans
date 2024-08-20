@@ -1,4 +1,5 @@
 import asyncio
+from asyncio import sleep
 import datetime
 import json
 import os
@@ -12,7 +13,7 @@ import discord
 from discord import team
 import requests
 from discord import file
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View
 from discord.utils import get
 from replit.object_storage import Client
@@ -21,6 +22,8 @@ from replit.object_storage.errors import ObjectNotFoundError
 client = Client()  # Create a client instance
 EU_QUEUE_CHANNEL_ID = 1274045870223921262
 US_QUEUE_CHANNEL_ID = 1274045870568112243
+text_channel_id = 00000
+channel_id_flag = False
 
 last_update_time = {"us": time.time(), "eu": time.time()}
 RATE_LIMIT_PERIOD = 10  # 10 seconds
@@ -54,14 +57,14 @@ maps = ["bank", "border", "Chalet", "Clubhouse", "Consulate", "kafe", "Lair", "N
 intents = discord.Intents.default()
 intents.members = True  # Enable member intents (to see members in guilds)
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
+bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 
 # Classes:
 class QView(View):
 
     def __init__(self, ctx, embed_message, server_id, region, system, GID):
-        super().__init__()
+        super().__init__(timeout=None)
         self.ctx = ctx
         self.embed_message = embed_message
         self.server_id = server_id
@@ -108,7 +111,8 @@ class QView(View):
                 "You have joined the queue!", ephemeral=True)
             # For testing
             print(f"length of player list: {len(self.player_list)}")
-
+            # while len(self.player_list) < match_size:
+            #    self.player_list.append(user)
             if len(self.player_list) >= match_size:
                 print(self.player_list)
                 roster = [
@@ -121,12 +125,13 @@ class QView(View):
                 for mem in range(len(Team_1)):
                     Team_1[mem] = discord.utils.get(
                         self.ctx.guild.members,
-                        name=Team_1[mem].dis_name).mention
+                        name=Team_1[mem].dis_name)
                 for mem in range(len(Team_2)):
                     Team_2[mem] = discord.utils.get(
                         self.ctx.guild.members,
-                        name=Team_2[mem].dis_name).mention
-                await match_info(self.ctx, self.GID,Team_1, Team_2)
+                        name=Team_2[mem].dis_name)
+                asyncio.create_task(match_info(self.ctx, self.GID,
+                                               Team_1, Team_2))
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
@@ -142,7 +147,7 @@ class QView(View):
         embed = self.embed_message.embeds[0]
         user = interaction.user
 
-        if user in self.player_list:
+        while user in self.player_list:
             self.player_list.remove(user)  # Remove the actual user object
 
         self.update_players_field(embed)
@@ -168,6 +173,7 @@ class QView(View):
                                    inline=False)
                 break
 
+
 class MapButton(View):
     def __init__(self):
         super().__init__(timeout=300)
@@ -177,8 +183,9 @@ class MapButton(View):
     async def random_map_button(self, interaction: discord.Interaction, button: Button):
         random_map = random.choice(maps)
         if not self.used:
-             await interaction.response.send_message(f"The random map is: {random_map}")
-             self.used=True
+            await interaction.response.send_message(f"The random map is: {random_map}")
+            self.used = True
+
 
 class VoteButton(View):
     def __init__(self):
@@ -206,10 +213,8 @@ class VoteButton(View):
 
 
 async def match_info(ctx, match_id, Team_1, Team_2):
-    # Example data
     team_1_members = Team_1
     team_2_members = Team_2
-
 
     match_id = generate_match_id()
     url = 'https://www.mapban.gg/en/ban/r6s/competitive/bo1'
@@ -230,8 +235,8 @@ async def match_info(ctx, match_id, Team_1, Team_2):
     embed.add_field(name="Match ID", value=match_id, inline=False)
 
     # Add Team 1 and Team 2 columns
-    team_1_str = "\n".join(team_1_members)
-    team_2_str = "\n".join(team_2_members)
+    team_1_str = "\n".join(mem.mention for mem in team_1_members)
+    team_2_str = "\n".join(mem.mention for mem in team_2_members)
     embed.add_field(name="Blue Team", value=team_1_str, inline=True)
     embed.add_field(name="Orange Team", value=team_2_str, inline=True)
 
@@ -242,10 +247,13 @@ async def match_info(ctx, match_id, Team_1, Team_2):
     # Optionally, add a footer or other information
     embed.set_footer(text="Good luck to both teams!")
 
-    # Send the embed to the channel
+    # for mem in range(5):
+    #    Team_1_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_1[mem].dis_name)
+    #    Team_2_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_2[mem].dis_name)
     view = MapButton()
-    channel = ctx.guild.get_channel(1273461521279619085)
-    await channel.send(embed=embed, view=view)
+    await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 10, embed, view)
+    # Send the embed to the channel
+
 
 # Command to create a new LFG queue with the updated QView
 @bot.command()
@@ -314,7 +322,7 @@ class Player:
     def sanitize_filename(cls, filename):
         if not isinstance(filename, str):
             filename = filename.dis_name
-            #raise ValueError("filename must be a string")
+            # raise ValueError("filename must be a string")
         return filename.strip().replace(" ", "_").replace(".", "_")
 
     def save_to_json(self, filename):
@@ -342,37 +350,6 @@ class Player:
 
 
 # Functions:
-async def update_channel_name(region, new_name: str):
-    global last_update_time
-    # Determine the correct channel based on the region
-    print(f"region recieved: {region}")
-    if region.lower() == "us":
-        channel = bot.get_channel(US_QUEUE_CHANNEL_ID)
-        new_name = "us-queue-" + str(new_name)
-    elif region.lower() == "eu":
-        channel = bot.get_channel(EU_QUEUE_CHANNEL_ID)
-        new_name = "eu-queue-" + str(new_name)
-    else:
-        return
-    # Calculate time since the last update for this region
-    time_since_last_update = time.time() - last_update_time[region.lower()]
-    # If we're within the minimum time between updates, wait before proceeding
-    if time_since_last_update < RATE_LIMIT_PERIOD:
-        wait_time = RATE_LIMIT_PERIOD - time_since_last_update
-        print(
-            f"Rate limit hit for {region.upper()}. Waiting {wait_time:.2f} seconds."
-        )
-        await asyncio.sleep(wait_time)
-    # Update the channel's name
-    await channel.edit(name=new_name)
-    print(f"Channel name updated to: {new_name}")
-    # Update the last update time
-    last_update_time[region.lower()] = time.time()
-    # Update the channel's name
-    await channel.edit(name=new_name)
-    print(f"Channel name updated to: {new_name}")
-
-
 def check_profile(filename, user):
     try:
         player = Player.load_from_json(filename, user.name)
@@ -405,7 +382,7 @@ def best_team_partition(players, match_size):
     print(players)
     n = len(players)
     k = int(match_size / 2)
-    #if n < 2 * k:
+    # if n < 2 * k:
     #    raise ValueError(
     #        "Number of players must be at least twice the team size.")
 
@@ -460,6 +437,49 @@ def make_a_match(cxt, roster, server_id):
     return members, Team_1, Team_2, Discarded
 
 
+async def create_match_channels(ctx, Team_1, Team_2,
+                                match_id, delete_after, embed, view):
+    global text_channel_id, channel_id_flag
+    guild = ctx.guild
+    category = await guild.create_category(f"Match {match_id}")
+
+    # Create text channel
+    text_channel = await guild.create_text_channel(f"match-{match_id}-chat", category=category)
+    mentions = ' '.join(mem.mention for mem in Team_1 + Team_2)
+    await text_channel.send(mentions)
+    await text_channel.send(embed=embed, view=view)
+    await sleep(10)
+    # Create voice channels
+    voice_channel1 = await guild.create_voice_channel(f"Blue - {match_id}", category=category)
+    voice_channel2 = await guild.create_voice_channel(f"Orange - {match_id}", category=category)
+
+    # Set permissions for text channel
+    await text_channel.set_permissions(guild.default_role, view_channel=False)
+    for member in Team_1 + Team_2:
+        if isinstance(member, discord.Member) or isinstance(member, discord.Role):
+            await text_channel.set_permissions(member, view_channel=True, send_messages=True)
+        else:
+            print(f"Unexpected member type: {type(member)}")
+
+    # Set permissions for voice channels
+    # await voice_channel1.set_permissions(guild.default_role, view_channel=False)
+    # for member in team1_members:
+    #    await voice_channel1.set_permissions(member, view_channel=True, connect=True)
+    #
+    #    await voice_channel2.set_permissions(guild.default_role, view_channel=False)
+    #    for member in team2_members:
+    #        await voice_channel2.set_permissions(member, view_channel=True, connect=True)
+
+    # Wait for the specified time before deleting the channels
+    await sleep(delete_after)
+
+    # Delete channels
+    await text_channel.delete()
+    await voice_channel1.delete()
+    await voice_channel2.delete()
+    await category.delete()
+
+
 # Bot Commands
 
 
@@ -505,9 +525,9 @@ async def setup_profiles(ctx):
 
         region = await ask_user_for_input(
             new_user, "Please enter your region from this list:\n"
-            "(Asia East, Asia South East, Japan East, South Africa North, "
-            "UAE North, EU West, EU North, US East, US Central, US West, "
-            "US South Central, Brazil South, Australia East)")
+                      "(Asia East, Asia South East, Japan East, South Africa North, "
+                      "UAE North, EU West, EU North, US East, US Central, US West, "
+                      "US South Central, Brazil South, Australia East)")
         if region.lower() in [r.lower() for r in list_of_regions]:
             print(f"Collected region: {region}")
         else:
@@ -517,7 +537,7 @@ async def setup_profiles(ctx):
 
         system = await ask_user_for_input(
             new_user, "Please enter your system:\n"
-            '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
+                      '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
         if system.lower() in [stm.lower() for stm in list_of_systems]:
             pass
         else:
@@ -527,7 +547,7 @@ async def setup_profiles(ctx):
 
         rank = await ask_user_for_input(
             new_user, "Please enter your rank:\n"
-            "(Use the form G1 for Gold 1, P3 for Plat 3, etc... Use D1 for champ.)"
+                      "(Use the form G1 for Gold 1, P3 for Plat 3, etc... Use D1 for champ.)"
         )
         if rank.lower() in [rnk.lower() for rnk in list_of_ranks]:
             print(f"Collected rank: {rank}")
@@ -614,8 +634,6 @@ async def Join(ctx,
         ).send(
             f"{user.mention}, you're already in the queue for {player.region} region."
         )
-    # Update queue channel names
-    await update_channel_name(major_region, str(len(queue[server_id])))
     # Try to make a match
     if len(queue[server_id]) >= match_size:
         await discord.utils.get(ctx.guild.text_channels,
@@ -647,9 +665,6 @@ async def Leave(ctx):
                     f"{user.mention} has left the {system.upper()} queue for the {region} region."
                 )
                 left_queue = True
-
-                # Update the queue channel name
-                await update_channel_name(region, str(len(queue[server_id])))
 
     if not left_queue:
         await ctx.send(f"{user.mention}, you are not in any queues.")
@@ -683,20 +698,20 @@ async def create_lobby(ctx, team_a: str, team_b: str, members: list):
     match_ID = generate_match_id()
     poll_message = await ctx.send(
         "Match ID: " + match_ID + "\n"
-        f"🔵{team_a}\n"
-        f"🔵{members[0].mention}\n"
-        f"🔵{members[1].mention}\n"
-        f"🔵{members[2].mention}\n"
-        f"🔵{members[3].mention}\n"
-        f"🔵{members[4].mention}\n\n"
-        f"🟠{team_b}\n"
-        f"🟠{members[5].mention}\n"
-        f"🟠{members[6].mention}\n"
-        f"🟠{members[7].mention}\n"
-        f"🟠{members[8].mention}\n"
-        f"🟠{members[9].mention}\n\n"
-        f"Indicate the winner!\n🔵 {team_a} vs. 🟠 {team_b}\n\n"
-        "React with 🔵 or 🟠")
+                                  f"🔵{team_a}\n"
+                                  f"🔵{members[0].mention}\n"
+                                  f"🔵{members[1].mention}\n"
+                                  f"🔵{members[2].mention}\n"
+                                  f"🔵{members[3].mention}\n"
+                                  f"🔵{members[4].mention}\n\n"
+                                  f"🟠{team_b}\n"
+                                  f"🟠{members[5].mention}\n"
+                                  f"🟠{members[6].mention}\n"
+                                  f"🟠{members[7].mention}\n"
+                                  f"🟠{members[8].mention}\n"
+                                  f"🟠{members[9].mention}\n\n"
+                                  f"Indicate the winner!\n🔵 {team_a} vs. 🟠 {team_b}\n\n"
+                                  "React with 🔵 or 🟠")
 
     # Add reactions for voting
     await poll_message.add_reaction("🔵")
@@ -802,9 +817,6 @@ async def clear_input(ctx, *, arg: str):
                 await ctx.send(
                     f"{user.mention}, your input '{arg}' is not recognized. Please try again with a valid region or 'all'."
                 )
-
-        for region in regions:
-            await update_channel_name(region, "0")
 
     except Exception as e:
         print(f"An error occurred: {e}")
