@@ -1,15 +1,22 @@
 import asyncio
+import datetime
 import json
 import os
 import random
+import re
 import time
 from itertools import combinations
 from typing import Optional
 
 import discord
+from discord import team
+import requests
+from discord import file
 from discord.ext import commands
+from discord.ui import Button, View
 from discord.utils import get
 from replit.object_storage import Client
+from replit.object_storage.errors import ObjectNotFoundError
 
 client = Client()  # Create a client instance
 EU_QUEUE_CHANNEL_ID = 1274045870223921262
@@ -42,6 +49,8 @@ queue_regions = {
     for region in list_of_major_regions
 }
 
+maps = ["bank", "border", "Chalet", "Clubhouse", "Consulate", "kafe", "Lair", "Night Haven", "Skyscraper"]
+
 intents = discord.Intents.default()
 intents.members = True  # Enable member intents (to see members in guilds)
 intents.message_content = True
@@ -49,6 +58,220 @@ bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
 
 
 # Classes:
+class QView(View):
+
+    def __init__(self, ctx, embed_message, server_id, region, system, GID):
+        super().__init__()
+        self.ctx = ctx
+        self.embed_message = embed_message
+        self.server_id = server_id
+        self.player_list = []  # This will store Discord user objects
+        self.region = region
+        self.system = system
+        self.GID = GID
+
+    def get_player_list(self):
+        # Return the list of players in a formatted string
+        displayed_players = self.player_list[:
+                                             15]  # Only display first 15 players
+        more_players_count = len(self.player_list) - 15
+
+        players_text = "\n".join(
+            [player.mention for player in displayed_players])
+        if more_players_count > 0:
+            players_text += f"\n+ {more_players_count} more"
+
+        return players_text
+
+    @discord.ui.button(label="Join Queue",
+                       style=discord.ButtonStyle.green,
+                       custom_id="join_game")
+    async def join_game(self, interaction: discord.Interaction,
+                        button: Button):
+        try:
+            embed = self.embed_message.embeds[0]
+            user = interaction.user
+            player = check_profile(self.server_id, user)
+
+            if player is not None and player != "NUP":
+                rank_emoji = get(interaction.guild.emojis, name=player.rank)
+                player_entry = f"{rank_emoji} @{user.display_name} ({user.display_name})" if rank_emoji else f"@{user.display_name} ({user.display_name})"
+            else:
+                player_entry = f"@{user.display_name} ({user.display_name})"
+
+            if user not in self.player_list:
+                self.player_list.append(user)
+
+            self.update_players_field(embed)
+            await self.embed_message.edit(embed=embed)
+            await interaction.response.send_message(
+                "You have joined the queue!", ephemeral=True)
+            # For testing
+            print(f"length of player list: {len(self.player_list)}")
+
+            if len(self.player_list) >= match_size:
+                print(self.player_list)
+                roster = [
+                    Player.load_from_json(self.server_id, p.name)
+                    for p in self.player_list
+                ]
+                print(roster)
+                members, Team_1, Team_2, Discarded = make_a_match(
+                    self.ctx, roster, self.server_id)
+                for mem in range(len(Team_1)):
+                    Team_1[mem] = discord.utils.get(
+                        self.ctx.guild.members,
+                        name=Team_1[mem].dis_name).mention
+                for mem in range(len(Team_2)):
+                    Team_2[mem] = discord.utils.get(
+                        self.ctx.guild.members,
+                        name=Team_2[mem].dis_name).mention
+                await match_info(self.ctx, self.GID,Team_1, Team_2)
+                self.player_list = []
+                self.update_players_field(embed)
+                await self.embed_message.edit(embed=embed)
+        except Exception as e:
+            await interaction.response.send_message(
+                f"An error occurred: {str(e)}", ephemeral=True)
+
+    @discord.ui.button(label="Leave Queue",
+                       style=discord.ButtonStyle.red,
+                       custom_id="leave_queue")
+    async def leave_queue(self, interaction: discord.Interaction,
+                          button: Button):
+        embed = self.embed_message.embeds[0]
+        user = interaction.user
+
+        if user in self.player_list:
+            self.player_list.remove(user)  # Remove the actual user object
+
+        self.update_players_field(embed)
+        await self.embed_message.edit(embed=embed)
+        await interaction.response.send_message(
+            "You have left the game queue.", ephemeral=True)
+
+    def update_players_field(self, embed):
+        # Show only the first 15 players
+        displayed_players = self.player_list[:15]
+        more_players_count = len(self.player_list) - 15
+
+        players_text = "\n".join(
+            [player.mention for player in displayed_players])
+        if more_players_count > 0:
+            players_text += f"\n+ {more_players_count} more"
+
+        for field in embed.fields:
+            if field.name == "Players":
+                embed.set_field_at(index=embed.fields.index(field),
+                                   name="Players",
+                                   value=players_text,
+                                   inline=False)
+                break
+
+class MapButton(View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.used = False
+
+    @discord.ui.button(label="Get Random Map", style=discord.ButtonStyle.primary)
+    async def random_map_button(self, interaction: discord.Interaction, button: Button):
+        random_map = random.choice(maps)
+        if not self.used:
+             await interaction.response.send_message(f"The random map is: {random_map}")
+             self.used=True
+
+class VoteButton(View):
+    def __init__(self):
+        super().__init__(timeout=60)  # Set a timeout of 60 seconds for the button
+        self.blue_votes = 0
+        self.orange_votes = 0
+
+    @discord.ui.button(label="Vote for Blue Team", style=discord.ButtonStyle.primary, custom_id="vote_blue")
+    async def blue_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.blue_votes += 1
+        await interaction.response.send_message(f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
+        if self.blue_votes >= 6:
+            await interaction.channel.send("Blue Team wins with 6 votes!")
+
+    @discord.ui.button(label="Vote for Orange Team", style=discord.ButtonStyle.secondary, custom_id="vote_orange")
+    async def orange_button(self, button: discord.ui.Button, interaction: discord.Interaction):
+        self.orange_votes += 1
+        await interaction.response.send_message(f"Orange Team now has {self.orange_votes} votes.", ephemeral=True)
+        if self.orange_votes >= 6:
+            await interaction.channel.send("Orange Team wins with 6 votes!")
+
+    async def on_timeout(self):
+        # Handle timeout if needed
+        await self.message.edit(content="Voting has ended.", view=None)
+
+
+async def match_info(ctx, match_id, Team_1, Team_2):
+    # Example data
+    team_1_members = Team_1
+    team_2_members = Team_2
+
+
+    match_id = generate_match_id()
+    url = 'https://www.mapban.gg/en/ban/r6s/competitive/bo1'
+    # Send a GET request to the webpage
+    response = requests.get(url)
+    response.raise_for_status()  # Ensure we notice bad responses
+
+    # Use regex to find all URLs in input fields
+    links = re.findall(r'>([^<]+)<', response.text)
+
+    # Filter out any strings that are just whitespace
+    links = [s.strip() for s in links if s.strip()]
+    team1Link = links[30]
+    team2Link = links[33]
+
+    # Create the embed
+    embed = discord.Embed(title="Match Information", color=0x00ff00)
+    embed.add_field(name="Match ID", value=match_id, inline=False)
+
+    # Add Team 1 and Team 2 columns
+    team_1_str = "\n".join(team_1_members)
+    team_2_str = "\n".join(team_2_members)
+    embed.add_field(name="Blue Team", value=team_1_str, inline=True)
+    embed.add_field(name="Orange Team", value=team_2_str, inline=True)
+
+    embed.add_field(name="Blue Team Bans:", value=team1Link, inline=False)
+    embed.add_field(name="Orange Team Bans:", value=team2Link, inline=False)
+    embed.add_field(name="Or, click below to recieve a random map", value=" ", inline=False)
+
+    # Optionally, add a footer or other information
+    embed.set_footer(text="Good luck to both teams!")
+
+    # Send the embed to the channel
+    view = MapButton()
+    channel = ctx.guild.get_channel(1273461521279619085)
+    await channel.send(embed=embed, view=view)
+
+# Command to create a new LFG queue with the updated QView
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def lfg(ctx, region, system):
+    GID = generate_match_id()
+    if system.upper() == "PC":
+        syscolor = discord.Color.dark_red()
+    else:
+        syscolor = discord.Color.dark_blue()
+    embed = discord.Embed(title=f" Queue for {str(region).upper()}",
+                          color=syscolor)
+
+    embed.add_field(name="Players", value="", inline=False)
+    embed.add_field(name="System", value=str(system).upper(), inline=True)
+    embed.add_field(
+        name="Started at",
+        value=datetime.datetime.now().strftime("%I:%M%p on %B %d, %Y"),
+        inline=True)
+    embed.set_footer(text=f"Game ID: {GID}")
+
+    message = await ctx.send(embed=embed)
+    view = QView(ctx, message, ctx.guild.id, region, system, GID)
+    await message.edit(view=view)
+
+
 class Player:
 
     def __init__(self, ubi_name, dis_name, elo, wins, losses, rank, region,
@@ -89,9 +312,9 @@ class Player:
 
     @classmethod
     def sanitize_filename(cls, filename):
-        # Remove leading/trailing whitespace and replace spaces with underscores
-        if type(filename) != str:
-            filename = filename.name
+        if not isinstance(filename, str):
+            filename = filename.dis_name
+            #raise ValueError("filename must be a string")
         return filename.strip().replace(" ", "_").replace(".", "_")
 
     def save_to_json(self, filename):
@@ -104,11 +327,17 @@ class Player:
     def load_from_json(cls, filename, username):
         file_safe_name = cls.sanitize_filename(username)
         key = f"player_data/{filename}/{file_safe_name}.json"
+
+        print(f"Attempting to download player data for key: {key}")
+
         try:
             data = client.download_as_text(key)
             return cls.from_dict(json.loads(data))
-        except FileNotFoundError:
+        except client.ObjectNotFoundError:
             print(f"No data found for {key}")
+            return None
+        except Exception as e:
+            print(f"Error downloading player data for {key}: {str(e)}")
             return None
 
 
@@ -146,18 +375,16 @@ async def update_channel_name(region, new_name: str):
 
 def check_profile(filename, user):
     try:
-        # Try to load the player profile from the JSON file
-        player = Player.load_from_json(filename, user)
+        player = Player.load_from_json(filename, user.name)
 
-        # Check if the player profile exists
-        if player.dis_name == user.name:
+        if player and player.dis_name == user.name:
             print("Player exists:", player.to_dict())
             return player
         else:
             print("Player does not match")
             return None
     except FileNotFoundError:
-        return None
+        return "NUP"
 
 
 def generate_match_id():
@@ -175,11 +402,12 @@ def get_queue(region, server_id):
 
 
 def best_team_partition(players, match_size):
+    print(players)
     n = len(players)
     k = int(match_size / 2)
-    if n < 2 * k:
-        raise ValueError(
-            "Number of players must be at least twice the team size.")
+    #if n < 2 * k:
+    #    raise ValueError(
+    #        "Number of players must be at least twice the team size.")
 
     all_indices = set(range(n))
     min_diff = float('inf')
@@ -222,11 +450,10 @@ def make_a_match(cxt, roster, server_id):
         try:
             player = Player.load_from_json(server_id, dis)
             players.append(player)
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (ObjectNotFoundError, json.JSONDecodeError):
             print(f"Error loading player data for {dis}.")
 
     Team_1, Team_2, Discarded = best_team_partition(players, match_size)
-
     # Return the members for this match and clear them from the queue
     members = [dis for dis in roster if dis in Team_1 or dis in Team_2]
 
@@ -236,7 +463,9 @@ def make_a_match(cxt, roster, server_id):
 # Bot Commands
 
 
-@bot.command(name='setup_profile', aliases=['setup profile', 'setup'], help='Make a user profile')
+@bot.command(name='setup_profile',
+             aliases=['setup profile', 'setup'],
+             help='Make a user profile')
 async def setup_profiles(ctx):
     guild = ctx.guild
     new_user = ctx.author
@@ -338,23 +567,32 @@ async def Queue(ctx):
 
 # Subcommand for joining the queue
 @Queue.command(name='Join', aliases=['join', 'j', 'J', 'JOIN'])
-async def Join(ctx, role: Optional[str] = "Flex"):
+async def Join(ctx,
+               region: Optional[str] = None,
+               role: Optional[str] = "Flex"):
     server_id = ctx.guild.id
     user = ctx.author
     role_dict[user] = role
-    print(role)
     # Fetch player's system and region
     player = check_profile(server_id, user)
-    if not player:
+    if player == "NUP":
         await ctx.send("No user profile, make one with !setup_profile")
         return
     system = player.system.lower()
-    major_region = player.region[:2].lower()
-    if major_region not in list_of_major_regions:
-        await ctx.send(
-            "Invalid region in profile. Please update your profile with a valid region."
-        )
-        return
+    if region:
+        if region in list_of_major_regions:
+            major_region = region
+        else:
+            await ctx.sent(
+                f"invalid region, use a region form this list: \n {list_of_major_regions}"
+            )
+    else:
+        major_region = player.region[:2].lower()
+        if major_region not in list_of_major_regions:
+            await ctx.send(
+                "Invalid region in profile. Please update your profile with a valid region."
+            )
+            return
     # Determine the correct queue
     queues = queue_regions[major_region]
     queue = queues['pc'] if 'pc' in system else queues['console']
@@ -397,32 +635,24 @@ async def Join(ctx, role: Optional[str] = "Flex"):
 async def Leave(ctx):
     server_id = ctx.guild.id
     user = ctx.author
-    # Fetch player's region
-    player = check_profile(server_id, user)
-    if not player:
-        await ctx.send("No user profile, make one with !setup_profile")
-        return
-    major_region = player.region[:2].lower()
-    if major_region not in list_of_major_regions:
-        await ctx.send(
-            "Invalid region in profile. Please update your profile with a valid region."
-        )
-        return
     left_queue = False
-    # Check which queue the player is in and remove them
-    for system in ['pc', 'console']:
-        queue = queue_regions[major_region][system]
-        if server_id in queue and user in queue[server_id]:
-            queue[server_id].remove(user)
-            await ctx.send(
-                f"{user.mention} has left the {system.upper()} queue for the {player.region} region."
-            )
-            left_queue = True
-            await update_channel_name(major_region, str(len(queue[server_id])))
+
+    # Iterate over all regions and systems
+    for region in list_of_major_regions:
+        for system in ['pc', 'console']:
+            queue = queue_regions[region][system]
+            if server_id in queue and user in queue[server_id]:
+                queue[server_id].remove(user)
+                await ctx.send(
+                    f"{user.mention} has left the {system.upper()} queue for the {region} region."
+                )
+                left_queue = True
+
+                # Update the queue channel name
+                await update_channel_name(region, str(len(queue[server_id])))
+
     if not left_queue:
-        await ctx.send(
-            f"{user.mention}, you are not in any queue for the {player.region} region."
-        )
+        await ctx.send(f"{user.mention}, you are not in any queues.")
 
 
 # Subcommand for listing the queue
@@ -512,7 +742,7 @@ def get_player_file_path(user_id):
     return os.path.join(player_data_dir, f"{user_id}.json")
 
 
-@bot.command(name='assign_system_roles', help ='defunct')
+@bot.command(name='assign_system_roles', help='defunct')
 @commands.has_permissions(administrator=True)
 async def assign_system_roles(ctx):
     print("command called")
