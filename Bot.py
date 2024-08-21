@@ -20,15 +20,7 @@ from replit.object_storage import Client
 from replit.object_storage.errors import ObjectNotFoundError
 
 client = Client()  # Create a client instance
-EU_QUEUE_CHANNEL_ID = 1274045870223921262
-US_QUEUE_CHANNEL_ID = 1274045870568112243
-text_channel_id = 00000
-channel_id_flag = False
-
-last_update_time = {"us": time.time(), "eu": time.time()}
-RATE_LIMIT_PERIOD = 10  # 10 seconds
 role_dict = {}
-full_queue = None
 match_size = 10
 members = []
 list_of_regions = [
@@ -52,12 +44,12 @@ queue_regions = {
     for region in list_of_major_regions
 }
 
-maps = ["bank", "border", "Chalet", "Clubhouse", "Consulate", "kafe", "Lair", "Night Haven", "Skyscraper"]
+maps = ["Bank", "Border", "Chalet", "Clubhouse", "Consulate", "Kafe Dostoyevsky", "Lair", "Night Haven", "Skyscraper"]
 
 intents = discord.Intents.default()
-intents.members = True  # Enable member intents (to see members in guilds)
+intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
+bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
 
 
 # Classes:
@@ -111,7 +103,7 @@ class QView(View):
                 "You have joined the queue!", ephemeral=True)
             # For testing
             print(f"length of player list: {len(self.player_list)}")
-            # while len(self.player_list) < match_size:
+            #while len(self.player_list) < match_size:
             #    self.player_list.append(user)
             if len(self.player_list) >= match_size:
                 print(self.player_list)
@@ -130,8 +122,7 @@ class QView(View):
                     Team_2[mem] = discord.utils.get(
                         self.ctx.guild.members,
                         name=Team_2[mem].dis_name)
-                asyncio.create_task(match_info(self.ctx, self.GID,
-                                               Team_1, Team_2))
+                await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2))
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
@@ -174,85 +165,81 @@ class QView(View):
                 break
 
 
-class MapButton(View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self.used = False
+class LView(View):
+    def __init__(self, ctx, Team_1, Team_2, server_id):
+        super().__init__(timeout=7200)
+        self.randMapUsed = False
+        self.matchOutcomeReported = False
+        self.ctx = ctx
+        self.Team_1 = Team_1
+        self.Team_2 = Team_2
+        self.server_id = server_id
+        self.blue_votes = 0
+        self.orange_votes = 0
+        self.voted_users = set()  # Track users who have voted
 
     @discord.ui.button(label="Get Random Map", style=discord.ButtonStyle.primary)
     async def random_map_button(self, interaction: discord.Interaction, button: Button):
-        random_map = random.choice(maps)
-        if not self.used:
+        if not self.randMapUsed:
+            random_map = random.choice(maps)
             await interaction.response.send_message(f"The random map is: {random_map}")
-            self.used = True
+            self.randMapUsed = True
 
+    @discord.ui.button(label="Vote for Blue Team", style=discord.ButtonStyle.green, custom_id="vote_blue")
+    async def blue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        if not self.matchOutcomeReported:
+            if user_id in self.voted_users:
+                await interaction.response.send_message("You have already voted.", ephemeral=True)
+                return
 
-class VoteButton(View):
-    def __init__(self):
-        super().__init__(timeout=60)  # Set a timeout of 60 seconds for the button
-        self.blue_votes = 0
-        self.orange_votes = 0
+            self.blue_votes += 1
+            self.voted_users.add(user_id)
+            await interaction.response.send_message(f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
 
-    @discord.ui.button(label="Vote for Blue Team", style=discord.ButtonStyle.primary, custom_id="vote_blue")
-    async def blue_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        self.blue_votes += 1
-        await interaction.response.send_message(f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
-        if self.blue_votes >= 6:
-            await interaction.channel.send("Blue Team wins with 6 votes!")
+            if self.blue_votes > match_size / 2:
+                await interaction.channel.send("Blue Team wins!")
+                self.matchOutcomeReported = True
+                await self.adjust_elo(self.Team_1, self.Team_2)
+        else:
+            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
 
-    @discord.ui.button(label="Vote for Orange Team", style=discord.ButtonStyle.secondary, custom_id="vote_orange")
-    async def orange_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        self.orange_votes += 1
-        await interaction.response.send_message(f"Orange Team now has {self.orange_votes} votes.", ephemeral=True)
-        if self.orange_votes >= 6:
-            await interaction.channel.send("Orange Team wins with 6 votes!")
+    @discord.ui.button(label="Vote for Orange Team", style=discord.ButtonStyle.green, custom_id="vote_orange")
+    async def orange_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        if not self.matchOutcomeReported:
+            if user_id in self.voted_users:
+                await interaction.response.send_message("You have already voted.", ephemeral=True)
+                return
+
+            self.orange_votes += 1
+            self.voted_users.add(user_id)
+            await interaction.response.send_message(f"Orange Team now has {self.orange_votes} votes.", ephemeral=True)
+
+            if self.orange_votes > match_size / 2:
+                await interaction.channel.send("Orange Team wins!")
+                self.matchOutcomeReported = True
+                await self.adjust_elo(self.Team_2, self.Team_1)
+        else:
+            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
 
     async def on_timeout(self):
         # Handle timeout if needed
-        await self.message.edit(content="Voting has ended.", view=None)
+        pass
 
+    async def adjust_elo(self, winning_team, losing_team):
+        for mem in winning_team:
+            player = Player.load_from_json(self.server_id, mem.name)
+            player.elo = player.elo + 100
+            player.save_to_json(self.server_id, mem.name)
+            await sleep(1)
 
-async def match_info(ctx, match_id, Team_1, Team_2):
-    team_1_members = Team_1
-    team_2_members = Team_2
+        for mem in losing_team:
+            player = Player.load_from_json(self.server_id, mem.name)
+            player.elo = player.elo - 100
+            player.save_to_json(self.server_id, mem.name)
+            await sleep(1)
 
-    match_id = generate_match_id()
-    url = 'https://www.mapban.gg/en/ban/r6s/competitive/bo1'
-    # Send a GET request to the webpage
-    response = requests.get(url)
-    response.raise_for_status()  # Ensure we notice bad responses
-
-    # Use regex to find all URLs in input fields
-    links = re.findall(r'>([^<]+)<', response.text)
-
-    # Filter out any strings that are just whitespace
-    links = [s.strip() for s in links if s.strip()]
-    team1Link = links[30]
-    team2Link = links[33]
-
-    # Create the embed
-    embed = discord.Embed(title="Match Information", color=0x00ff00)
-    embed.add_field(name="Match ID", value=match_id, inline=False)
-
-    # Add Team 1 and Team 2 columns
-    team_1_str = "\n".join(mem.mention for mem in team_1_members)
-    team_2_str = "\n".join(mem.mention for mem in team_2_members)
-    embed.add_field(name="Blue Team", value=team_1_str, inline=True)
-    embed.add_field(name="Orange Team", value=team_2_str, inline=True)
-
-    embed.add_field(name="Blue Team Bans:", value=team1Link, inline=False)
-    embed.add_field(name="Orange Team Bans:", value=team2Link, inline=False)
-    embed.add_field(name="Or, click below to recieve a random map", value=" ", inline=False)
-
-    # Optionally, add a footer or other information
-    embed.set_footer(text="Good luck to both teams!")
-
-    # for mem in range(5):
-    #    Team_1_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_1[mem].dis_name)
-    #    Team_2_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_2[mem].dis_name)
-    view = MapButton()
-    await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 10, embed, view)
-    # Send the embed to the channel
 
 
 # Command to create a new LFG queue with the updated QView
@@ -325,8 +312,8 @@ class Player:
             # raise ValueError("filename must be a string")
         return filename.strip().replace(" ", "_").replace(".", "_")
 
-    def save_to_json(self, filename):
-        file_safe_name = self.sanitize_filename(self.dis_name)
+    def save_to_json(self, filename, username):
+        file_safe_name = self.sanitize_filename(username)
         key = f"player_data/{filename}/{file_safe_name}.json"
         client.upload_from_text(key, json.dumps(self.to_dict()))
         print(f"Saved player data to object storage as {key}")
@@ -350,6 +337,50 @@ class Player:
 
 
 # Functions:
+#Creates the blurb containing all match info in a new lobby
+async def match_info(ctx, match_id, Team_1, Team_2):
+    team_1_members = Team_1
+    team_2_members = Team_2
+
+    match_id = generate_match_id()
+    url = 'https://www.mapban.gg/en/ban/r6s/competitive/bo1'
+    # Send a GET request to the webpage
+    response = requests.get(url)
+    response.raise_for_status()  # Ensure we notice bad responses
+
+    # Use regex to find all URLs in input fields
+    links = re.findall(r'>([^<]+)<', response.text)
+
+    # Filter out any strings that are just whitespace
+    links = [s.strip() for s in links if s.strip()]
+    team1Link = links[30]
+    team2Link = links[33]
+
+    # Create the embed
+    embed = discord.Embed(title="Match Information", color=0x00ff00)
+    embed.add_field(name="Match ID", value=match_id, inline=False)
+
+    # Add Team 1 and Team 2 columns
+    team_1_str = "\n".join(mem.mention for mem in team_1_members)
+    team_2_str = "\n".join(mem.mention for mem in team_2_members)
+    embed.add_field(name="Blue Team", value=team_1_str, inline=True)
+    embed.add_field(name="Orange Team", value=team_2_str, inline=True)
+
+    embed.add_field(name="Blue Team Bans:", value=team1Link, inline=False)
+    embed.add_field(name="Orange Team Bans:", value=team2Link, inline=False)
+    embed.add_field(name="Or, click below to recieve a random map", value=" ", inline=False)
+
+    # Optionally, add a footer or other information
+    embed.set_footer(text="Good luck to both teams!")
+
+    # for mem in range(5):
+    #    Team_1_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_1[mem].dis_name)
+    #    Team_2_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_2[mem].dis_name)
+    view = LView(ctx, Team_1, Team_2, ctx.guild.id)
+    await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 7200, embed, view)
+    # Send the embed to the channel
+
+# Verify a profile exists
 def check_profile(filename, user):
     try:
         player = Player.load_from_json(filename, user.name)
@@ -363,28 +394,15 @@ def check_profile(filename, user):
     except FileNotFoundError:
         return "NUP"
 
-
+# Create a unique match id for more detailed data collection later
 def generate_match_id():
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
-
-# Function to get the queue based on region
-def get_queue(region, server_id):
-    queues = queue_regions[region]
-    if region == 'eu':
-        queue = queues['pc'] if 'pc' in system else queues['console']
-    elif region == 'us':
-        queue = queues['pc'] if 'pc' in system else queues['console']
-    return queue
-
-
+# Finds the most even match mathematically based on elo
 def best_team_partition(players, match_size):
     print(players)
     n = len(players)
     k = int(match_size / 2)
-    # if n < 2 * k:
-    #    raise ValueError(
-    #        "Number of players must be at least twice the team size.")
 
     all_indices = set(range(n))
     min_diff = float('inf')
@@ -420,7 +438,8 @@ def best_team_partition(players, match_size):
 
     return best_team1, best_team2, best_discarded
 
-
+# Loads all player data and returns the team
+# Needs to be renamed to reflect functionality or removed as it is a bit redundant
 def make_a_match(cxt, roster, server_id):
     players = []
     for dis in roster:
@@ -436,10 +455,9 @@ def make_a_match(cxt, roster, server_id):
 
     return members, Team_1, Team_2, Discarded
 
-
+# Create the text and voice channels for a lobby. Assign permissions as needed
 async def create_match_channels(ctx, Team_1, Team_2,
                                 match_id, delete_after, embed, view):
-    global text_channel_id, channel_id_flag
     guild = ctx.guild
     category = await guild.create_category(f"Match {match_id}")
 
@@ -454,24 +472,20 @@ async def create_match_channels(ctx, Team_1, Team_2,
     voice_channel2 = await guild.create_voice_channel(f"Orange - {match_id}", category=category)
 
     # Set permissions for text channel
-    await text_channel.set_permissions(guild.default_role, view_channel=False)
+    await text_channel.set_permissions(guild.default_role, view_channel=True, send_messages=False)
+    await voice_channel1.set_permissions(guild.default_role, view_channel=True, connect=False)
+    await voice_channel2.set_permissions(guild.default_role, view_channel=True, connect=False)
+
     for member in Team_1 + Team_2:
         if isinstance(member, discord.Member) or isinstance(member, discord.Role):
             await text_channel.set_permissions(member, view_channel=True, send_messages=True)
+            await voice_channel1.set_permissions(member, view_channel=True, connect=True)
+            await voice_channel2.set_permissions(member, view_channel=True, connect=True)
         else:
             print(f"Unexpected member type: {type(member)}")
 
-    # Set permissions for voice channels
-    # await voice_channel1.set_permissions(guild.default_role, view_channel=False)
-    # for member in team1_members:
-    #    await voice_channel1.set_permissions(member, view_channel=True, connect=True)
-    #
-    #    await voice_channel2.set_permissions(guild.default_role, view_channel=False)
-    #    for member in team2_members:
-    #        await voice_channel2.set_permissions(member, view_channel=True, connect=True)
-
     # Wait for the specified time before deleting the channels
-    await sleep(delete_after)
+    await sleep(delete_after) # default match time is set to 2 hours = 7200 seconds
 
     # Delete channels
     await text_channel.delete()
@@ -481,8 +495,6 @@ async def create_match_channels(ctx, Team_1, Team_2,
 
 
 # Bot Commands
-
-
 @bot.command(name='setup_profile',
              aliases=['setup profile', 'setup'],
              help='Make a user profile')
@@ -562,7 +574,7 @@ async def setup_profiles(ctx):
 
         player = Player(ubi_name, dis_name, elo, wins, losses, rank, region,
                         system)
-        player.save_to_json(ctx.guild.id)
+        player.save_to_json(ctx.guild.id, dis_name)
         print(f"Saved player profile for {new_user.name}")
 
         await new_user.send(
@@ -579,258 +591,12 @@ async def on_ready():
 
 
 # Create a group of commands under !Queue
-@bot.group(name="Queue", aliases=["q"], help='join, leave, list')
+@bot.group(name="Queue", aliases=["q"], help='Defunct, please use the queues in the top text channels')
 async def Queue(ctx):
     if ctx.invoked_subcommand is None:
-        await ctx.send("Please use a valid subcommand: Join, Leave, or List")
-
-
-# Subcommand for joining the queue
-@Queue.command(name='Join', aliases=['join', 'j', 'J', 'JOIN'])
-async def Join(ctx,
-               region: Optional[str] = None,
-               role: Optional[str] = "Flex"):
-    server_id = ctx.guild.id
-    user = ctx.author
-    role_dict[user] = role
-    # Fetch player's system and region
-    player = check_profile(server_id, user)
-    if player == "NUP":
-        await ctx.send("No user profile, make one with !setup_profile")
-        return
-    system = player.system.lower()
-    if region:
-        if region in list_of_major_regions:
-            major_region = region
-        else:
-            await ctx.sent(
-                f"invalid region, use a region form this list: \n {list_of_major_regions}"
-            )
-    else:
-        major_region = player.region[:2].lower()
-        if major_region not in list_of_major_regions:
-            await ctx.send(
-                "Invalid region in profile. Please update your profile with a valid region."
-            )
-            return
-    # Determine the correct queue
-    queues = queue_regions[major_region]
-    queue = queues['pc'] if 'pc' in system else queues['console']
-    # Create the queue if it doesn't exist
-    if server_id not in queue:
-        queue[server_id] = []
-    # Add user to the queue if not already in it
-    if user not in queue[server_id]:
-        queue[server_id].append(user)
-
-        await discord.utils.get(
-            ctx.guild.text_channels, name="bot-commands"
-        ).send(
-            f"{user.mention} has joined the queue for {system} players in {major_region.upper()} region!"
-        )
-    else:
-        await discord.utils.get(
-            ctx.guild.text_channels, name="bot-commands"
-        ).send(
-            f"{user.mention}, you're already in the queue for {player.region} region."
-        )
-    # Try to make a match
-    if len(queue[server_id]) >= match_size:
-        await discord.utils.get(ctx.guild.text_channels,
-                                name="bot-commands").send('making a match')
-        members, Team_1, Team_2, Discarded = make_a_match(
-            ctx, queue[server_id], server_id)
-        if members:
-            await create_lobby(ctx, "Blue Team DEF", "Orange Team ATK",
-                               members)
-            queue[server_id] = [
-                user for user in queue.get(server_id, [])
-                if user not in members
-            ]
-
-
-@Queue.command(name="Leave", aliases=['leave', 'l', 'L', 'LEAVE'])
-async def Leave(ctx):
-    server_id = ctx.guild.id
-    user = ctx.author
-    left_queue = False
-
-    # Iterate over all regions and systems
-    for region in list_of_major_regions:
-        for system in ['pc', 'console']:
-            queue = queue_regions[region][system]
-            if server_id in queue and user in queue[server_id]:
-                queue[server_id].remove(user)
-                await ctx.send(
-                    f"{user.mention} has left the {system.upper()} queue for the {region} region."
-                )
-                left_queue = True
-
-    if not left_queue:
-        await ctx.send(f"{user.mention}, you are not in any queues.")
-
-
-# Subcommand for listing the queue
-@Queue.command(name="List", aliases=['list', 'LIST'])
-async def ListQ(ctx):
-    server_id = ctx.guild.id
-    response = ""
-
-    queues_with_players = []
-    for region, systems in queue_regions.items():
-        for system, queue in systems.items():
-            if server_id in queue and queue[server_id]:
-                queue_list = "\n".join(
-                    [str(item) for item in queue[server_id]])
-                response += f"{system.upper()} Queue for {region}:\n{queue_list}\n{len(queue[server_id])}/{match_size}\n\n"
-                queues_with_players.append(f"{region} - {system.upper()}")
-
-    if not queues_with_players:
-        response = "All queues are empty."
-
-    await ctx.send(response)
-
-
-# Match Reporting
-@bot.command()
-async def create_lobby(ctx, team_a: str, team_b: str, members: list):
-    # Create the lobby with unique match ID
-    match_ID = generate_match_id()
-    poll_message = await ctx.send(
-        "Match ID: " + match_ID + "\n"
-                                  f"🔵{team_a}\n"
-                                  f"🔵{members[0].mention}\n"
-                                  f"🔵{members[1].mention}\n"
-                                  f"🔵{members[2].mention}\n"
-                                  f"🔵{members[3].mention}\n"
-                                  f"🔵{members[4].mention}\n\n"
-                                  f"🟠{team_b}\n"
-                                  f"🟠{members[5].mention}\n"
-                                  f"🟠{members[6].mention}\n"
-                                  f"🟠{members[7].mention}\n"
-                                  f"🟠{members[8].mention}\n"
-                                  f"🟠{members[9].mention}\n\n"
-                                  f"Indicate the winner!\n🔵 {team_a} vs. 🟠 {team_b}\n\n"
-                                  "React with 🔵 or 🟠")
-
-    # Add reactions for voting
-    await poll_message.add_reaction("🔵")
-    await poll_message.add_reaction("🟠")
-
-    def check(reaction, user):
-        return (user != bot.user and str(reaction.emoji) in ["🔵", "🟠"]
-                and reaction.message.id == poll_message.id)
-
-    try:
-        # Wait for a certain amount of time (e.g., 60 seconds) or until one team has 6 votes
-        while True:
-            reaction, user = await bot.wait_for("reaction_add",
-                                                timeout=14400,
-                                                check=check)
-
-            # Fetch the message again to get updated reaction counts
-            poll_message = await ctx.fetch_message(poll_message.id)
-            votes_a = discord.utils.get(poll_message.reactions,
-                                        emoji="🔵").count - 1
-            votes_b = discord.utils.get(poll_message.reactions,
-                                        emoji="🟠").count - 1
-
-            if votes_a > match_size / 2:
-                await ctx.send(
-                    f"{team_a} wins match {match_ID} with {votes_a} votes! 🎉")
-                break
-            elif votes_b > match_size / 2:
-                await ctx.send(
-                    f"{team_b} wins match {match_ID} with {votes_b} votes! 🎉")
-                break
-    except discord.ext.commands.errors.CommandInvokeError:
-        # Handle the case where no one votes or the command is cancelled
-        await ctx.send("No winner was decided.")
-
-
-# Everything surrounding player data
-player_data_dir = "player_data"
-os.makedirs(player_data_dir, exist_ok=True)
-
-
-def get_player_file_path(user_id):
-    return os.path.join(player_data_dir, f"{user_id}.json")
-
-
-@bot.command(name='assign_system_roles', help='defunct')
-@commands.has_permissions(administrator=True)
-async def assign_system_roles(ctx):
-    print("command called")
-    server_id = ctx.guild.id
-    guild = ctx.guild
-
-    for member in guild.members:
-        print("checking member:", member)
-        if not member.bot:
-            print("checking profile")
-            player = check_profile(server_id, member)
-            if player:
-                print("player found")
-                system = player.system
-                print(system)
-                if system:
-                    roles = system.split(
-                    )  # In case multiple systems are provided (e.g., "PC PS")
-                    for role_name in roles:
-                        role = get(guild.roles, name=role_name)
-                        if role:
-                            await member.add_roles(role)
-                            await ctx.send(
-                                f"Assigned role {role_name} to {member.name}")
-                        else:
-                            await ctx.send(
-                                f"Role {role_name} not found on the server.")
-            else:
-                await ctx.send(f"No profile found for {member.name}")
-
-
-@bot.command(name='clear', help='Clear a queue')
-@commands.has_permissions(administrator=True)
-async def clear_input(ctx, *, arg: str):
-    user = ctx.author
-    try:
-        regions = list_of_major_regions
-        systems = ['pc', 'console']
-
-        if arg == "all":
-            # Clear all queues
-            for region in regions:
-                for system in systems:
-                    queue_regions[region][system] = {}
-            await ctx.send(f"All queues have been cleared.")
-
-        else:
-            input_text_lower = arg.lower()
-            if input_text_lower in regions:
-                # Clear queues for a specific region
-                for system in systems:
-                    queue_regions[input_text_lower][system] = {}
-                await ctx.send(
-                    f"All queues for the {arg} region have been cleared.")
-
-            else:
-                await ctx.send(
-                    f"{user.mention}, your input '{arg}' is not recognized. Please try again with a valid region or 'all'."
-                )
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        await ctx.send(f"An error occurred: {e}. Please try again.")
-
-    @clear_input.error
-    async def clear_input_error(ctx, error):
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.send(
-                f"{ctx.author.mention}, you do not have permission to use this command."
-            )
-        else:
-            await ctx.send(f"An error occurred: {str(error)}")
-
+        await ctx.send(f"This command is now defunct, please use the queues in the top text channels: "
+                       f"{discord.utils.get(ctx.guild.channels, name="us queue").mention}"
+                       f"{discord.utils.get(ctx.guild.channels, name="eu queue").mention}")
 
 @bot.command(name='feature-request',
              aliases=['fr', 'request', 'suggest'],
