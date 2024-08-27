@@ -1,4 +1,3 @@
-from peewee import *
 from Database import *
 
 User.insert(
