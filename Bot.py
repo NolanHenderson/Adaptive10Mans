@@ -108,28 +108,18 @@ class QView(View):
             # For testing
             print(f"length of player list: {len(self.player_list)}")
             #while len(self.player_list) < match_size:
-<<<<<<< HEAD
                 #self.player_list.append(user)
-=======
-            #    self.player_list.append(user)
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
             if len(self.player_list) >= match_size:
                 print(self.player_list)
                 roster = [
                     Player.load_from_json(self.server_id, p.name)
                     for p in self.player_list
                 ]
-<<<<<<< HEAD
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
                 members, Team_1, Team_2, Discarded = make_a_match(self.ctx, roster, self.server_id)
-=======
-                print(roster)
-                members, Team_1, Team_2, Discarded = make_a_match(
-                    self.ctx, roster, self.server_id)
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
                 for mem in range(len(Team_1)):
                     Team_1[mem] = discord.utils.get(
                         self.ctx.guild.members,
@@ -139,12 +129,6 @@ class QView(View):
                         self.ctx.guild.members,
                         name=Team_2[mem].dis_name)
                 await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2))
-<<<<<<< HEAD
-=======
-                self.player_list = []
-                self.update_players_field(embed)
-                await self.embed_message.edit(embed=embed)
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
         except Exception as e:
             await interaction.response.send_message(
                 f"An error occurred: {str(e)}", ephemeral=True)
@@ -259,11 +243,8 @@ class LView(View):
             player.save_to_json(self.server_id, mem.name)
             await sleep(1)
 
-<<<<<<< HEAD
         make_leaderboard(self.ctx)
 
-=======
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
 
 
 # Command to create a new LFG queue with the updated QView
@@ -517,7 +498,6 @@ async def create_match_channels(ctx, Team_1, Team_2,
     await voice_channel2.delete()
     await category.delete()
 
-<<<<<<< HEAD
 
 def load_all_players():
     unsorted_leaderboard = {}
@@ -567,8 +547,6 @@ def distribute_ranks(leaderboard):
     sorted_rank_distribution = sorted(rank_distribution, key=lambda x: rank_to_number[x], reverse=True)
     return sorted_rank_distribution
 
-=======
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
 
 # Bot Commands
 @bot.command(name='setup_profile',
@@ -670,13 +648,7 @@ async def on_ready():
 @bot.group(name="Queue", aliases=["q"], help='Defunct, please use the queues in the top text channels')
 async def Queue(ctx):
     if ctx.invoked_subcommand is None:
-<<<<<<< HEAD
         await ctx.send(f"This command is now defunct, please use the queues in the top text channels")
-=======
-        await ctx.send(f"This command is now defunct, please use the queues in the top text channels: "
-                       f"{discord.utils.get(ctx.guild.channels, name="us queue").mention}"
-                       f"{discord.utils.get(ctx.guild.channels, name="eu queue").mention}")
->>>>>>> 4ced5c0bf18012d73dad3141a02611615e89041e
 
 @bot.command(name='feature-request',
              aliases=['fr', 'request', 'suggest'],
