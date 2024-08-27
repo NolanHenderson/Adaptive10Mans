@@ -44,6 +44,10 @@ class User(BaseModel):
     region = ForeignKeyField(Region, to_field="region_id")
     system = ForeignKeyField(System, to_field="system_id")
 
+class Map(BaseModel):
+    map_id = PrimaryKeyField()
+    name = CharField(unique=True)
+
 if not System.table_exists():
     System.create_table()
 
@@ -58,6 +62,9 @@ if not Rank.table_exists():
 
 if not User.table_exists():
     User.create_table()
+
+if not Map.table_exists():
+    Map.create_table()
     
 if db.is_closed():
     db.connect()
@@ -134,4 +141,16 @@ System.insert_many([
     { System.name: "PC", MajorRegion.code: "PC" },
     { System.name: "PlayStation", MajorRegion.code: "PS" },
     { System.name: "XBox", MajorRegion.code: "Xbox" },
+]).on_conflict_ignore().execute()
+
+Map.insert_many([
+    { Map.name: "Bank" },
+    { Map.name: "Border" },
+    { Map.name: "Chalet" },
+    { Map.name: "Clubhouse" },
+    { Map.name: "Consulate" },
+    { Map.name: "Kafe Dostoyevsky" },
+    { Map.name: "Lair" },
+    { Map.name: "Night Haven" },
+    { Map.name: "Skyscraper" }
 ]).on_conflict_ignore().execute()
