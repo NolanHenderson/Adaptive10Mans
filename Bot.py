@@ -23,16 +23,16 @@ from replit.object_storage.errors import ObjectNotFoundError
 
 client = Client()  # Create a client instance
 role_dict = {}
-match_size = 10
+match_size = 8
 members = []
 list_of_regions = [
     "Asia East", "Asia South East", "Japan East", "South Africa North",
     "UAE North", "EU West", "EU North", "US East", "US Central", "US West",
     "US South Central", "Brazil South", "Australia East"
 ]
-list_of_ranks = ["C1","B1","S1","G1","P1","E1","D1", "CP"]
+list_of_ranks = ["C1", "B1", "S1", "G1", "P1", "E1", "D1", "CP"]
 
-#list_of_ranks = [
+# list_of_ranks = [
 #    "C5", "C4", "C3", "C2", "C1", "B5", "B4", "B3", "B2", "B1", "S5", "S4",
 #    "S3", "S2", "S1", "G5", "G4", "G3", "G2", "G1", "P5", "P4", "P3", "P2",
 #    "P1", "E5", "E4", "E3", "E2", "E1", "D5", "D4", "D3", "D2", "D1", "CP"]
@@ -53,7 +53,7 @@ maps = ["Bank", "Border", "Chalet", "Clubhouse", "Consulate", "Kafe Dostoyevsky"
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
+bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 
 # Classes:
@@ -107,8 +107,8 @@ class QView(View):
                 "You have joined the queue!", ephemeral=True)
             # For testing
             print(f"length of player list: {len(self.player_list)}")
-            #while len(self.player_list) < match_size:
-                #self.player_list.append(user)
+            # while len(self.player_list) < match_size:
+            # self.player_list.append(user)
             if len(self.player_list) >= match_size:
                 print(self.player_list)
                 roster = [
@@ -246,7 +246,6 @@ class LView(View):
         make_leaderboard(self.ctx)
 
 
-
 # Command to create a new LFG queue with the updated QView
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -342,7 +341,7 @@ class Player:
 
 
 # Functions:
-#Creates the blurb containing all match info in a new lobby
+# Creates the blurb containing all match info in a new lobby
 async def match_info(ctx, match_id, Team_1, Team_2):
     team_1_members = Team_1
     team_2_members = Team_2
@@ -385,6 +384,7 @@ async def match_info(ctx, match_id, Team_1, Team_2):
     await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 7200, embed, view)
     # Send the embed to the channel
 
+
 # Verify a profile exists
 def check_profile(filename, user):
     try:
@@ -399,9 +399,11 @@ def check_profile(filename, user):
     except FileNotFoundError:
         return "NUP"
 
+
 # Create a unique match id for more detailed data collection later
 def generate_match_id():
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+
 
 # Finds the most even match mathematically based on elo
 def best_team_partition(players, match_size):
@@ -443,6 +445,7 @@ def best_team_partition(players, match_size):
 
     return best_team1, best_team2, best_discarded
 
+
 # Loads all player data and returns the team
 # Needs to be renamed to reflect functionality or removed as it is a bit redundant
 def make_a_match(cxt, roster, server_id):
@@ -459,6 +462,7 @@ def make_a_match(cxt, roster, server_id):
     members = [dis for dis in roster if dis in Team_1 or dis in Team_2]
 
     return members, Team_1, Team_2, Discarded
+
 
 # Create the text and voice channels for a lobby. Assign permissions as needed
 async def create_match_channels(ctx, Team_1, Team_2,
@@ -490,7 +494,7 @@ async def create_match_channels(ctx, Team_1, Team_2,
             print(f"Unexpected member type: {type(member)}")
 
     # Wait for the specified time before deleting the channels
-    await sleep(delete_after) # default match time is set to 2 hours = 7200 seconds
+    await sleep(delete_after)  # default match time is set to 2 hours = 7200 seconds
 
     # Delete channels
     await text_channel.delete()
@@ -517,6 +521,7 @@ def load_all_players():
     except Exception as e:
         print(f"An error occurred: {str(e)}")
     return unsorted_leaderboard
+
 
 def get_sorted_leaderboard():
     unsorted_leaderboard = load_all_players()
@@ -650,6 +655,7 @@ async def Queue(ctx):
     if ctx.invoked_subcommand is None:
         await ctx.send(f"This command is now defunct, please use the queues in the top text channels")
 
+
 @bot.command(name='feature-request',
              aliases=['fr', 'request', 'suggest'],
              help='Submit a feature request')
@@ -671,45 +677,54 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
     if arg is not None:
         if isinstance(arg, int):
             page = arg
-        elif isinstance(arg, str) and arg.isnumeric():
-            page = int(arg)
+            print("page is int")
+        elif arg.startswith("<") and arg.endswith(">"):
+            print("arg is discord object")
+            dis_id = arg.strip("<@").strip(">")
+            find_name = await bot.fetch_user(int(dis_id))
+            print(f"looking for {find_name}")
         else:
             find_name = str(arg)
+            find_name = find_name.lower()
+            print(f"leaderboard looking for name {find_name}")
 
     leaderboard = client.download_as_text('leaderboard')  # download as str
     leaderboard = json.loads(leaderboard)  # convert back to a dict
-    #print(leaderboard)
+    # print(leaderboard)
     rank_dist = distribute_ranks(leaderboard)
 
     if not leaderboard:
         await ctx.send("No players found.")
         return
     emoji = get(ctx.message.guild.emojis, name="CP")
-    embed = discord.Embed(title=f"Leaderboard {emoji}", description=f"Page {page}/{(len(leaderboard)//10)+1}", color=discord.Color.yellow())
+    embed = discord.Embed(title=f"Leaderboard {emoji}", description=f"Page {page}/{len(leaderboard) // 10}",
+                          color=discord.Color.yellow())
     table = "`Rank |  Name      |  ELO`\n"
     table += "`---------------------------`\n"
 
     for rank, (name, elo) in enumerate(leaderboard.items(), start=1):
-        if arg == name:
+        if str(find_name) == name:
             await ctx.send(f"{name} is rank {rank} with an elo of {elo}")
+            print(f"{name} is rank {rank} with an elo of {elo}")
             return
 
-        if rank > (page*10 - 10):
+        if rank > (page * 10 - 10):
             truncated_name = name[:9]  # Truncate the name if necessary
-            emoji = get(ctx.message.guild.emojis, name=rank_dist[rank-1])
+            emoji = get(ctx.message.guild.emojis, name=rank_dist[rank - 1])
             table += f"{str(emoji)}`{rank:<3}|  {truncated_name:<{10}}|  {elo}`\n"
-        if rank > page*10 and not find_name:
+        if rank > page * 10 and not find_name:
             break
-    # Add the entire table as a single field in the embed
-    embed.add_field(name="Leaderboard", value=f"{table}", inline=False)
     if not find_name:
+        embed.add_field(name="Leaderboard", value=f"{table}", inline=False)
         await ctx.send(embed=embed)
+
 
 @bot.command(name='make_leaderboard', help='create the leaderboard')
 @commands.has_permissions(administrator=True)
 async def make_leaderboard(ctx):
     leaderboard = get_sorted_leaderboard()
     client.upload_from_text('leaderboard', json.dumps(leaderboard))
+
 
 # Run the bot
 bot.run(os.environ['DISCORD_KEY'])
