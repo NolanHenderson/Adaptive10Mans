@@ -58,6 +58,7 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
+leaderboard_update_time = datetime.datetime.now()
 
 # Classes:
 class QView(View):
@@ -72,14 +73,13 @@ class QView(View):
         self.GID = GID
         self.last_join_time = datetime.datetime.now()  # Track whaen the last player joined
         self.timeout_task = asyncio.create_task(self.check_queue_timeout())  # Start timeout checker
-        self.queue_timeout = 1800  # 30 minutes timeout (adjust as needed)
+        self.queue_timeout = 3600*3  # 1 hour timeout * n
         #self.queue_timeout = 60 # 1 Minute
         self.timeout_warning_sent = False  # Flag to track if a warning was sent
 
     def get_player_list(self):
         # Return the list of players in a formatted string
-        displayed_players = self.player_list[:
-                                             15]  # Only display first 15 players
+        displayed_players = self.player_list[:15]  # Only display first 15 players
         more_players_count = len(self.player_list) - 15
 
         players_text = "\n".join(
@@ -797,8 +797,9 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
         return
     emoji = get(ctx.message.guild.emojis, name="CP")
     embed = discord.Embed(title=f"Leaderboard {emoji}",
-                          description=f"Page {page}/{len(leaderboard) // 10}",
+                          description=f"Page {page}/{len(leaderboard) // 10} \n Last Update: {(datetime.datetime.now() - leaderboard_update_time).total_seconds()//60} minutes ago",
                           color=discord.Color.yellow())
+    #table = f"Last Update: {(datetime.datetime.now() - leaderboard_update_time).total_seconds()//60} minutes ago"
     table = "`Rank |  Name      |  ELO`\n"
     table += "`---------------------------`\n"
 
@@ -825,6 +826,8 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 async def make_leaderboard(ctx):
     leaderboard = get_sorted_leaderboard()
     client.upload_from_text('leaderboard', json.dumps(leaderboard))
+    leaderboard_update_time = datetime.datetime.now()
+    await ctx.send("Leaderboard updated ✅")
 
 
 @bot.command(name='DataBase', help='Refactor the DB')
