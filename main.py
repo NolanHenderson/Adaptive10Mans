@@ -207,100 +207,148 @@ class QView(View):
 
 
 class LView(View):
-
     def __init__(self, ctx, Team_1, Team_2, server_id, elo_scale):
-        super().__init__(timeout=7200)
+        super().__init__(timeout=7200)  # 2 hours
         self.randMapUsed = False
         self.matchOutcomeReported = False
         self.ctx = ctx
         self.Team_1 = Team_1
         self.Team_2 = Team_2
-        self.elo_scale = elo_scale  # team1 / team2
+        self.elo_scale = elo_scale
         self.server_id = server_id
         self.blue_votes = 0
         self.orange_votes = 0
-        self.voted_users = set()  # Track users who have voted
+        self.voted_users = set()
 
-    @discord.ui.button(label="Get Random Map",
-                       style=discord.ButtonStyle.primary)
-    async def random_map_button(self, interaction: discord.Interaction,
-                                button: Button):
+        # Start timeout warning task
+        self.timeout_warning_task = asyncio.create_task(self.check_match_timeout())
+
+    async def check_match_timeout(self):
+        """Check for match timeout and send warnings"""
+        try:
+            # Wait 1 hour 50 minutes (10 minutes before timeout)
+            await asyncio.sleep(6600)  # 7200 - 600 = 6600 seconds
+
+            if not self.matchOutcomeReported:
+                await self.ctx.channel.send("⚠️ **Match Warning**: This match will end in 10 minutes. Current votes:\n"
+                                            f"🔵 Blue Team: {self.blue_votes} votes\n"
+                                            f"🟠 Orange Team: {self.orange_votes} votes\n"
+                                            "Vote now or the team with more votes will win!")
+
+            # Wait another 10 minutes
+            await asyncio.sleep(600)
+
+            # If still no outcome, award win to team with most votes
+            if not self.matchOutcomeReported:
+                await self.handle_timeout_result()
+
+        except asyncio.CancelledError:
+            # Task was cancelled (match ended normally)
+            pass
+        except Exception as e:
+            print(f"Error in match timeout checker: {e}")
+
+    async def handle_timeout_result(self):
+        """Handle match result when timeout occurs"""
+        if self.blue_votes > self.orange_votes:
+            await self.ctx.channel.send("🔵 **Blue Team wins by timeout!** (More votes)")
+            self.matchOutcomeReported = True
+            self.elo_scale = 1 / self.elo_scale
+            await self.adjust_elo(self.Team_1, self.Team_2, self.elo_scale)
+        elif self.orange_votes > self.blue_votes:
+            await self.ctx.channel.send("🟠 **Orange Team wins by timeout!** (More votes)")
+            self.matchOutcomeReported = True
+            await self.adjust_elo(self.Team_2, self.Team_1, self.elo_scale)
+        else:
+            await self.ctx.channel.send("⚖️ **Match ended in a draw!** (Equal votes - no ELO changes)")
+            self.matchOutcomeReported = True
+            # No ELO changes for draws
+
+    @discord.ui.button(label="Get Random Map", style=discord.ButtonStyle.primary)
+    async def random_map_button(self, interaction: discord.Interaction, button: Button):
         if not self.randMapUsed:
             random_map = random.choice(maps)
-            await interaction.response.send_message(
-                f"The random map is: {random_map}")
+            await interaction.response.send_message(f"The random map is: {random_map}")
             self.randMapUsed = True
 
-    @discord.ui.button(label="Vote for Blue Team",
-                       style=discord.ButtonStyle.green,
-                       custom_id="vote_blue")
-    async def blue_button(self, interaction: discord.Interaction,
-                          button: discord.ui.Button):
+    @discord.ui.button(label="Vote for Blue Team", style=discord.ButtonStyle.green, custom_id="vote_blue")
+    async def blue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         if not self.matchOutcomeReported:
             if user_id in self.voted_users:
-                await interaction.response.send_message(
-                    "You have already voted.", ephemeral=True)
+                await interaction.response.send_message("You have already voted.", ephemeral=True)
                 return
 
             self.blue_votes += 1
             self.voted_users.add(user_id)
-            await interaction.response.send_message(
-                f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
+            await interaction.response.send_message(f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
 
             if self.blue_votes == (match_size / 2) + 1:
-                await interaction.channel.send("Blue Team wins!")
+                await interaction.channel.send("🔵 **Blue Team wins!**")
                 self.matchOutcomeReported = True
                 self.elo_scale = 1 / self.elo_scale
                 await self.adjust_elo(self.Team_1, self.Team_2, self.elo_scale)
+                # Cancel the timeout task since match is over
+                self.timeout_warning_task.cancel()
         else:
-            await interaction.response.send_message(
-                "Match outcome already reported.", ephemeral=True)
+            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
 
-    @discord.ui.button(label="Vote for Orange Team",
-                       style=discord.ButtonStyle.green,
-                       custom_id="vote_orange")
-    async def orange_button(self, interaction: discord.Interaction,
-                            button: discord.ui.Button):
+    @discord.ui.button(label="Vote for Orange Team", style=discord.ButtonStyle.green, custom_id="vote_orange")
+    async def orange_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
         if not self.matchOutcomeReported:
             if user_id in self.voted_users:
-                await interaction.response.send_message(
-                    "You have already voted.", ephemeral=True)
+                await interaction.response.send_message("You have already voted.", ephemeral=True)
                 return
 
             self.orange_votes += 1
             self.voted_users.add(user_id)
-            await interaction.response.send_message(
-                f"Orange Team now has {self.orange_votes} votes.",
-                ephemeral=True)
+            await interaction.response.send_message(f"Orange Team now has {self.orange_votes} votes.", ephemeral=True)
 
             if self.orange_votes == (match_size / 2) + 1:
-                await interaction.channel.send("Orange Team wins!")
+                await interaction.channel.send("🟠 **Orange Team wins!**")
                 self.matchOutcomeReported = True
                 await self.adjust_elo(self.Team_2, self.Team_1, self.elo_scale)
+                # Cancel the timeout task since match is over
+                self.timeout_warning_task.cancel()
         else:
-            await interaction.response.send_message(
-                "Match outcome already reported.", ephemeral=True)
+            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
 
     async def on_timeout(self):
-        # Handle timeout if needed
-        pass
+        """Handle View timeout (fallback)"""
+        if not self.matchOutcomeReported:
+            await self.handle_timeout_result()
 
     async def adjust_elo(self, winning_team, losing_team, elo_scale):
+        """Adjust ELO and automatically update leaderboard"""
         for mem in winning_team:
             player = Player.load_from_json(self.server_id, mem.name)
-            player.elo = player.elo + (100 * elo_scale)
-            player.save_to_json(self.server_id, mem.name)
+            if player:  # Check if player exists
+                player.elo = player.elo + (100 * elo_scale)
+                player.wins += 1  # Increment wins
+                player.save_to_json(self.server_id, mem.name)
             await sleep(1)
 
         for mem in losing_team:
             player = Player.load_from_json(self.server_id, mem.name)
-            player.elo = player.elo - (100 * elo_scale)
-            player.save_to_json(self.server_id, mem.name)
+            if player:  # Check if player exists
+                player.elo = player.elo - (100 * elo_scale)
+                player.losses += 1  # Increment losses
+                player.save_to_json(self.server_id, mem.name)
             await sleep(1)
 
-        await make_leaderboard(self.ctx)
+        # Automatically update leaderboard after ELO changes
+        await self.update_leaderboard()
+
+    async def update_leaderboard(self):
+        """Automatically update the leaderboard after match completion"""
+        try:
+            leaderboard = get_sorted_leaderboard()
+            client.upload_from_text('leaderboard', json.dumps(leaderboard))
+            leaderboard_update_time = datetime.datetime.now()
+            print("Leaderboard automatically updated after match completion")
+        except Exception as e:
+            print(f"Error updating leaderboard: {e}")
 
 
 # Command to create a new LFG queue with the updated QView
