@@ -1,29 +1,29 @@
 import asyncio
-from asyncio import sleep
 import datetime
 import json
 import os
 import random
 import re
 import time
-from typing import Union
+from asyncio import sleep
 from itertools import combinations
-import numpy as np
-from typing import Optional
+from typing import Optional, Union
 
 import discord
-from discord import team
+import numpy as np
 import requests
-from discord import file
+from discord import file, team
 from discord.ext import commands, tasks
 from discord.ui import Button, View
 from discord.utils import get
 from replit.object_storage import Client
 from replit.object_storage.errors import ObjectNotFoundError
 
+from Dis_Lookup import search_player
+
 client = Client()  # Create a client instance
 role_dict = {}
-match_size = 8
+match_size = 10
 members = []
 list_of_regions = [
     "Asia East", "Asia South East", "Japan East", "South Africa North",
@@ -48,7 +48,10 @@ queue_regions = {
     for region in list_of_major_regions
 }
 
-maps = ["Bank", "Border", "Chalet", "Clubhouse", "Consulate", "Kafe Dostoyevsky", "Lair", "Night Haven", "Skyscraper"]
+maps = [
+    "Bank", "Border", "Chalet", "Clubhouse", "Consulate", "Kafe Dostoyevsky",
+    "Lair", "Night Haven", "Skyscraper"
+]
 
 intents = discord.Intents.default()
 intents.members = True
@@ -58,7 +61,6 @@ bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 # Classes:
 class QView(View):
-
     def __init__(self, ctx, embed_message, server_id, region, system, GID):
         super().__init__(timeout=None)
         self.ctx = ctx
@@ -68,6 +70,11 @@ class QView(View):
         self.region = region
         self.system = system
         self.GID = GID
+        self.last_join_time = datetime.datetime.now()  # Track whaen the last player joined
+        self.timeout_task = asyncio.create_task(self.check_queue_timeout())  # Start timeout checker
+        self.queue_timeout = 1800  # 30 minutes timeout (adjust as needed)
+        #self.queue_timeout = 60 # 1 Minute
+        self.timeout_warning_sent = False  # Flag to track if a warning was sent
 
     def get_player_list(self):
         # Return the list of players in a formatted string
@@ -82,11 +89,8 @@ class QView(View):
 
         return players_text
 
-    @discord.ui.button(label="Join Queue",
-                       style=discord.ButtonStyle.green,
-                       custom_id="join_game")
-    async def join_game(self, interaction: discord.Interaction,
-                        button: Button):
+    @discord.ui.button(label="Join Queue", style=discord.ButtonStyle.green, custom_id="join_game")
+    async def join_game(self, interaction: discord.Interaction, button: Button):
         try:
             embed = self.embed_message.embeds[0]
             user = interaction.user
@@ -100,38 +104,31 @@ class QView(View):
 
             if user not in self.player_list:
                 self.player_list.append(user)
+                self.last_join_time = datetime.datetime.now()  # Update the timestamp when someone joins
+                self.timeout_warning_sent = False  # Reset warning flag if a new player joins
 
             self.update_players_field(embed)
             await self.embed_message.edit(embed=embed)
-            await interaction.response.send_message(
-                "You have joined the queue!", ephemeral=True)
+            await interaction.response.send_message("You have joined the queue!", ephemeral=True)
+
             # For testing
             print(f"length of player list: {len(self.player_list)}")
-            # while len(self.player_list) < match_size:
-            # self.player_list.append(user)
+
             if len(self.player_list) >= match_size:
                 print(self.player_list)
-                roster = [
-                    Player.load_from_json(self.server_id, p.name)
-                    for p in self.player_list
-                ]
+                roster = [Player.load_from_json(self.server_id, p.name) for p in self.player_list]
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
-                members, Team_1, Team_2, Discarded = make_a_match(self.ctx, roster, self.server_id)
+                members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
                 for mem in range(len(Team_1)):
-                    Team_1[mem] = discord.utils.get(
-                        self.ctx.guild.members,
-                        name=Team_1[mem].dis_name)
+                    Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
                 for mem in range(len(Team_2)):
-                    Team_2[mem] = discord.utils.get(
-                        self.ctx.guild.members,
-                        name=Team_2[mem].dis_name)
-                await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2))
+                    Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
+                await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
         except Exception as e:
-            await interaction.response.send_message(
-                f"An error occurred: {str(e)}", ephemeral=True)
+            await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
 
     @discord.ui.button(label="Leave Queue",
                        style=discord.ButtonStyle.red,
@@ -167,83 +164,143 @@ class QView(View):
                                    inline=False)
                 break
 
+    async def check_queue_timeout(self):
+        try:
+            while True:
+                await asyncio.sleep(60)  # Check every minute
+
+                # Calculate time since last join
+                time_diff = (datetime.datetime.now() - self.last_join_time).total_seconds()
+
+                # If 5 minutes before timeout and queue has players, send warning
+                if time_diff > (self.queue_timeout - 300) and not self.timeout_warning_sent and len(
+                        self.player_list) > 0:
+                    channel = self.ctx.channel
+                    await channel.send(f"⚠️ Warning: This queue will timeout in 5 minutes if no new players join.")
+                    self.timeout_warning_sent = True
+
+                # If timeout reached and queue has players, empty it
+                if time_diff > self.queue_timeout and len(self.player_list) > 0:
+                    embed = self.embed_message.embeds[0]
+
+                    # Notify players that the queue timed out
+                    channel = self.ctx.channel
+                    player_mentions = " ".join([player.mention for player in self.player_list])
+                    await channel.send(
+                        f"Queue timed out after {self.queue_timeout // 60} minutes of inactivity. {player_mentions}")
+
+                    # Empty the queue
+                    self.player_list = []
+                    self.update_players_field(embed)
+                    await self.embed_message.edit(embed=embed)
+                    self.timeout_warning_sent = False  # Reset warning flag
+
+                # Reset the timer if queue is empty
+                if len(self.player_list) == 0:
+                    self.last_join_time = datetime.datetime.now()
+                    self.timeout_warning_sent = False
+
+        except Exception as e:
+            print(f"Error in timeout checker: {e}")
+            # Restart the task if it crashes
+            self.timeout_task = asyncio.create_task(self.check_queue_timeout())
+
 
 class LView(View):
-    def __init__(self, ctx, Team_1, Team_2, server_id):
+
+    def __init__(self, ctx, Team_1, Team_2, server_id, elo_scale):
         super().__init__(timeout=7200)
         self.randMapUsed = False
         self.matchOutcomeReported = False
         self.ctx = ctx
         self.Team_1 = Team_1
         self.Team_2 = Team_2
+        self.elo_scale = elo_scale  # team1 / team2
         self.server_id = server_id
         self.blue_votes = 0
         self.orange_votes = 0
         self.voted_users = set()  # Track users who have voted
 
-    @discord.ui.button(label="Get Random Map", style=discord.ButtonStyle.primary)
-    async def random_map_button(self, interaction: discord.Interaction, button: Button):
+    @discord.ui.button(label="Get Random Map",
+                       style=discord.ButtonStyle.primary)
+    async def random_map_button(self, interaction: discord.Interaction,
+                                button: Button):
         if not self.randMapUsed:
             random_map = random.choice(maps)
-            await interaction.response.send_message(f"The random map is: {random_map}")
+            await interaction.response.send_message(
+                f"The random map is: {random_map}")
             self.randMapUsed = True
 
-    @discord.ui.button(label="Vote for Blue Team", style=discord.ButtonStyle.green, custom_id="vote_blue")
-    async def blue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Vote for Blue Team",
+                       style=discord.ButtonStyle.green,
+                       custom_id="vote_blue")
+    async def blue_button(self, interaction: discord.Interaction,
+                          button: discord.ui.Button):
         user_id = interaction.user.id
         if not self.matchOutcomeReported:
             if user_id in self.voted_users:
-                await interaction.response.send_message("You have already voted.", ephemeral=True)
+                await interaction.response.send_message(
+                    "You have already voted.", ephemeral=True)
                 return
 
             self.blue_votes += 1
             self.voted_users.add(user_id)
-            await interaction.response.send_message(f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
+            await interaction.response.send_message(
+                f"Blue Team now has {self.blue_votes} votes.", ephemeral=True)
 
-            if self.blue_votes > match_size / 2:
+            if self.blue_votes == (match_size / 2) + 1:
                 await interaction.channel.send("Blue Team wins!")
                 self.matchOutcomeReported = True
-                await self.adjust_elo(self.Team_1, self.Team_2)
+                self.elo_scale = 1 / self.elo_scale
+                await self.adjust_elo(self.Team_1, self.Team_2, self.elo_scale)
         else:
-            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
+            await interaction.response.send_message(
+                "Match outcome already reported.", ephemeral=True)
 
-    @discord.ui.button(label="Vote for Orange Team", style=discord.ButtonStyle.green, custom_id="vote_orange")
-    async def orange_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Vote for Orange Team",
+                       style=discord.ButtonStyle.green,
+                       custom_id="vote_orange")
+    async def orange_button(self, interaction: discord.Interaction,
+                            button: discord.ui.Button):
         user_id = interaction.user.id
         if not self.matchOutcomeReported:
             if user_id in self.voted_users:
-                await interaction.response.send_message("You have already voted.", ephemeral=True)
+                await interaction.response.send_message(
+                    "You have already voted.", ephemeral=True)
                 return
 
             self.orange_votes += 1
             self.voted_users.add(user_id)
-            await interaction.response.send_message(f"Orange Team now has {self.orange_votes} votes.", ephemeral=True)
+            await interaction.response.send_message(
+                f"Orange Team now has {self.orange_votes} votes.",
+                ephemeral=True)
 
-            if self.orange_votes > match_size / 2:
+            if self.orange_votes == (match_size / 2) + 1:
                 await interaction.channel.send("Orange Team wins!")
                 self.matchOutcomeReported = True
-                await self.adjust_elo(self.Team_2, self.Team_1)
+                await self.adjust_elo(self.Team_2, self.Team_1, self.elo_scale)
         else:
-            await interaction.response.send_message("Match outcome already reported.", ephemeral=True)
+            await interaction.response.send_message(
+                "Match outcome already reported.", ephemeral=True)
 
     async def on_timeout(self):
         # Handle timeout if needed
         pass
 
-    async def adjust_elo(self, winning_team, losing_team):
+    async def adjust_elo(self, winning_team, losing_team, elo_scale):
         for mem in winning_team:
             player = Player.load_from_json(self.server_id, mem.name)
-            player.elo = player.elo + 100
+            player.elo = player.elo + (100 * elo_scale)
             player.save_to_json(self.server_id, mem.name)
             await sleep(1)
 
         for mem in losing_team:
             player = Player.load_from_json(self.server_id, mem.name)
-            player.elo = player.elo - 100
+            player.elo = player.elo - (100 * elo_scale)
             player.save_to_json(self.server_id, mem.name)
             await sleep(1)
 
-        make_leaderboard(self.ctx)
+        await make_leaderboard(self.ctx)
 
 
 # Command to create a new LFG queue with the updated QView
@@ -342,7 +399,7 @@ class Player:
 
 # Functions:
 # Creates the blurb containing all match info in a new lobby
-async def match_info(ctx, match_id, Team_1, Team_2):
+async def match_info(ctx, match_id, Team_1, Team_2, elo_scale):
     team_1_members = Team_1
     team_2_members = Team_2
 
@@ -372,7 +429,9 @@ async def match_info(ctx, match_id, Team_1, Team_2):
 
     embed.add_field(name="Blue Team Bans:", value=team1Link, inline=False)
     embed.add_field(name="Orange Team Bans:", value=team2Link, inline=False)
-    embed.add_field(name="Or, click below to recieve a random map", value=" ", inline=False)
+    embed.add_field(name="Or, click below to recieve a random map",
+                    value=" ",
+                    inline=False)
 
     # Optionally, add a footer or other information
     embed.set_footer(text="Good luck to both teams!")
@@ -380,8 +439,9 @@ async def match_info(ctx, match_id, Team_1, Team_2):
     # for mem in range(5):
     #    Team_1_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_1[mem].dis_name)
     #    Team_2_usrs[mem] = discord.utils.get(ctx.guild.members,name=Team_2[mem].dis_name)
-    view = LView(ctx, Team_1, Team_2, ctx.guild.id)
-    await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 7200, embed, view)
+    view = LView(ctx, Team_1, Team_2, ctx.guild.id, elo_scale)
+    await create_match_channels(ctx, Team_1, Team_2, match_id[-4:], 7200,
+                                embed, view)
     # Send the embed to the channel
 
 
@@ -407,6 +467,7 @@ def generate_match_id():
 
 # Finds the most even match mathematically based on elo
 def best_team_partition(players, match_size):
+    random.shuffle(players)
     print(players)
     n = len(players)
     k = int(match_size / 2)
@@ -416,6 +477,7 @@ def best_team_partition(players, match_size):
     best_team1 = None
     best_team2 = None
     best_discarded = None
+    best_elo_scale = 1
 
     # Generate all combinations of k players from n
     for team1_indices in combinations(range(n), k):
@@ -437,13 +499,15 @@ def best_team_partition(players, match_size):
             score2 = sum(player.elo for player in team2)
 
             diff = abs(score1 - score2)
+            elo_scale = abs(score1) / abs(score2)
             if diff < min_diff:
                 min_diff = diff
+                best_elo_scale = elo_scale
                 best_team1 = team1
                 best_team2 = team2
                 best_discarded = discarded
 
-    return best_team1, best_team2, best_discarded
+    return best_team1, best_team2, best_discarded, best_elo_scale
 
 
 # Loads all player data and returns the team
@@ -457,44 +521,62 @@ def make_a_match(cxt, roster, server_id):
         except (ObjectNotFoundError, json.JSONDecodeError):
             print(f"Error loading player data for {dis}.")
 
-    Team_1, Team_2, Discarded = best_team_partition(players, match_size)
+    Team_1, Team_2, Discarded, elo_scale = best_team_partition(
+        players, match_size)
     # Return the members for this match and clear them from the queue
     members = [dis for dis in roster if dis in Team_1 or dis in Team_2]
 
-    return members, Team_1, Team_2, Discarded
+    return members, Team_1, Team_2, Discarded, elo_scale
 
 
 # Create the text and voice channels for a lobby. Assign permissions as needed
-async def create_match_channels(ctx, Team_1, Team_2,
-                                match_id, delete_after, embed, view):
+async def create_match_channels(ctx, Team_1, Team_2, match_id, delete_after,
+                                embed, view):
     guild = ctx.guild
     category = await guild.create_category(f"Match {match_id}")
 
     # Create text channel
-    text_channel = await guild.create_text_channel(f"match-{match_id}-chat", category=category)
+    text_channel = await guild.create_text_channel(f"match-{match_id}-chat",
+                                                   category=category)
     mentions = ' '.join(mem.mention for mem in Team_1 + Team_2)
     await text_channel.send(mentions)
     await text_channel.send(embed=embed, view=view)
     await sleep(10)
     # Create voice channels
-    voice_channel1 = await guild.create_voice_channel(f"Blue - {match_id}", category=category)
-    voice_channel2 = await guild.create_voice_channel(f"Orange - {match_id}", category=category)
+    voice_channel1 = await guild.create_voice_channel(f"Blue - {match_id}",
+                                                      category=category)
+    voice_channel2 = await guild.create_voice_channel(f"Orange - {match_id}",
+                                                      category=category)
 
     # Set permissions for text channel
-    await text_channel.set_permissions(guild.default_role, view_channel=True, send_messages=False)
-    await voice_channel1.set_permissions(guild.default_role, view_channel=True, connect=False)
-    await voice_channel2.set_permissions(guild.default_role, view_channel=True, connect=False)
+    await text_channel.set_permissions(guild.default_role,
+                                       view_channel=True,
+                                       send_messages=False)
+    await voice_channel1.set_permissions(guild.default_role,
+                                         view_channel=True,
+                                         connect=False)
+    await voice_channel2.set_permissions(guild.default_role,
+                                         view_channel=True,
+                                         connect=False)
 
     for member in Team_1 + Team_2:
-        if isinstance(member, discord.Member) or isinstance(member, discord.Role):
-            await text_channel.set_permissions(member, view_channel=True, send_messages=True)
-            await voice_channel1.set_permissions(member, view_channel=True, connect=True)
-            await voice_channel2.set_permissions(member, view_channel=True, connect=True)
+        if isinstance(member, discord.Member) or isinstance(
+                member, discord.Role):
+            await text_channel.set_permissions(member,
+                                               view_channel=True,
+                                               send_messages=True)
+            await voice_channel1.set_permissions(member,
+                                                 view_channel=True,
+                                                 connect=True)
+            await voice_channel2.set_permissions(member,
+                                                 view_channel=True,
+                                                 connect=True)
         else:
             print(f"Unexpected member type: {type(member)}")
 
     # Wait for the specified time before deleting the channels
-    await sleep(delete_after)  # default match time is set to 2 hours = 7200 seconds
+    await sleep(delete_after
+                )  # default match time is set to 2 hours = 7200 seconds
 
     # Delete channels
     await text_channel.delete()
@@ -507,14 +589,17 @@ def load_all_players():
     unsorted_leaderboard = {}
     new_player_list = []
     player_list = client.list()
-    player_list = player_list[1:]
+    player_list = player_list[2:]
+    print(player_list)
     for i in range(len(player_list)):
         new_player_list.append(player_list[i].name.split('/'))
+        print(new_player_list[i])
         new_player_list[i][2] = new_player_list[i][2].split(".")[0]
         print(f"index {i}: {new_player_list[i]}")
     try:
         for file_name in new_player_list:
-            player = Player.load_from_json(filename=file_name[1], username=file_name[2])
+            player = Player.load_from_json(filename=file_name[1],
+                                           username=file_name[2])
             unsorted_leaderboard[player.dis_name] = player.elo
     except ObjectNotFoundError:
         print("No player data found.")
@@ -525,7 +610,10 @@ def load_all_players():
 
 def get_sorted_leaderboard():
     unsorted_leaderboard = load_all_players()
-    sorted_leaderboard = dict(sorted(unsorted_leaderboard.items(), key=lambda item: int(item[1]), reverse=True))
+    sorted_leaderboard = dict(
+        sorted(unsorted_leaderboard.items(),
+               key=lambda item: int(item[1]),
+               reverse=True))
     return sorted_leaderboard
 
 
@@ -549,7 +637,9 @@ def distribute_ranks(leaderboard):
     # Convert numeric ranks to rank strings
     ranks = np.round(ranks).astype(int)
     rank_distribution = [number_to_rank[r] for r in ranks]
-    sorted_rank_distribution = sorted(rank_distribution, key=lambda x: rank_to_number[x], reverse=True)
+    sorted_rank_distribution = sorted(rank_distribution,
+                                      key=lambda x: rank_to_number[x],
+                                      reverse=True)
     return sorted_rank_distribution
 
 
@@ -594,21 +684,22 @@ async def setup_profiles(ctx):
         dis_name = new_user.name
         print(f"Collected Ubisoft name: {ubi_name}")
 
-        region = await ask_user_for_input(
-            new_user, "Please enter your region from this list:\n"
-                      "(Asia East, Asia South East, Japan East, South Africa North, "
-                      "UAE North, EU West, EU North, US East, US Central, US West, "
-                      "US South Central, Brazil South, Australia East)")
-        if region.lower() in [r.lower() for r in list_of_regions]:
-            print(f"Collected region: {region}")
-        else:
-            await new_user.send(
-                "Invalid region. Please use !setup profile again.")
-            return
+        region = "US East"
+        #await ask_user_for_input(
+        #    new_user, "Please enter your region from this list:\n"
+        #              "(Asia East, Asia South East, Japan East, South Africa North, "
+        #               "UAE North, EU West, EU North, US East, US Central, US West, "
+        #                 "US South Central, Brazil South, Australia East)")
+        #if region.lower() in [r.lower() for r in list_of_regions]:
+        #    print(f"Collected region: {region}")
+        #else:
+        #    await new_user.send(
+        #        "Invalid region. Please use !setup profile again.")
+        #    return
 
         system = await ask_user_for_input(
             new_user, "Please enter your system:\n"
-                      '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
+            '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
         if system.lower() in [stm.lower() for stm in list_of_systems]:
             pass
         else:
@@ -616,10 +707,11 @@ async def setup_profiles(ctx):
                 "Invalid system. Please use !setup profile again.")
             return
 
-        rank = await ask_user_for_input(
-            new_user, "Please enter your rank:\n"
-                      "(Use the form G1 for Gold 1, P3 for Plat 3, etc... Use D1 for champ.)"
-        )
+        rank = "G1"
+        #        await ask_user_for_input(
+        #    new_user, "Please enter your rank:\n"
+        #              "(Use the form G1 for Gold 1, P3 for Plat 3, etc... Use D1 for champ.)"
+        #)
         if rank.lower() in [rnk.lower() for rnk in list_of_ranks]:
             print(f"Collected rank: {rank}")
         else:
@@ -646,14 +738,21 @@ async def setup_profiles(ctx):
 
 @bot.event
 async def on_ready():
+    # Set the bot's status message
+    activity = discord.Game(name="Now with ranks!")
+    await bot.change_presence(status=discord.Status.online, activity=activity)
     print(f'Logged in as {bot.user}')
 
 
 # Create a group of commands under !Queue
-@bot.group(name="Queue", aliases=["q"], help='Defunct, please use the queues in the top text channels')
+@bot.group(name="Queue",
+           aliases=["q"],
+           help='Defunct, please use the queues in the top text channels')
 async def Queue(ctx):
     if ctx.invoked_subcommand is None:
-        await ctx.send(f"This command is now defunct, please use the queues in the top text channels")
+        await ctx.send(
+            f"This command is now defunct, please use the queues in the top text channels"
+        )
 
 
 @bot.command(name='feature-request',
@@ -697,7 +796,8 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
         await ctx.send("No players found.")
         return
     emoji = get(ctx.message.guild.emojis, name="CP")
-    embed = discord.Embed(title=f"Leaderboard {emoji}", description=f"Page {page}/{len(leaderboard) // 10}",
+    embed = discord.Embed(title=f"Leaderboard {emoji}",
+                          description=f"Page {page}/{len(leaderboard) // 10}",
                           color=discord.Color.yellow())
     table = "`Rank |  Name      |  ELO`\n"
     table += "`---------------------------`\n"
@@ -710,8 +810,9 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
         if rank > (page * 10 - 10):
             truncated_name = name[:9]  # Truncate the name if necessary
+            elo = str(elo)[:4]  # Truncate the ELO if necessary
             emoji = get(ctx.message.guild.emojis, name=rank_dist[rank - 1])
-            table += f"{str(emoji)}`{rank:<3}|  {truncated_name:<{10}}|  {elo}`\n"
+            table += f"{str(emoji)}`{rank:<3}|  {truncated_name:<{10}}|  {elo:<{4}}`\n"
         if rank > page * 10 and not find_name:
             break
     if not find_name:
@@ -726,8 +827,17 @@ async def make_leaderboard(ctx):
     client.upload_from_text('leaderboard', json.dumps(leaderboard))
 
 
+@bot.command(name='DataBase', help='Refactor the DB')
+@commands.has_permissions(administrator=True)
+async def DataBase(ctx):
+    guild = ctx.guild
+    for member in guild.members:
+        file_ = Player.load_from_json(guild, member.name)
+        if file_ is not None:
+            print(f"Loaded {file_}")
+            file_.save_to_json(guild, member.id)
+            print(f"saved {file_} as {member.id}")
+
+
 # Run the bot
 bot.run(os.environ['DISCORD_KEY'])
-
-
-

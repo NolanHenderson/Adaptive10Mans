@@ -14,22 +14,38 @@ async def search_player(guild, search_term):
         missing data will be type None
     """
 
+    print(f"Looking up player with arg: {search_term}")
+    try:
+        if search_term.startswith("<@"):
+            search_term = search_term.strip("<@").strip(">")
+            print(f"search_term stripped to: {search_term}")
+            search_term = int(search_term)
+    except AttributeError:
+        pass
+
     if isinstance(search_term, discord.Member):
         for member__ in guild.members:
             if member__ == search_term:
-                out = [member__, member__.id, member__.global_name, member__.guild_name]
+                out = [member__]
                 return out
     elif isinstance(search_term, int):
         for member__ in guild.members:
             if member__.id == search_term:
-                out = [member__, member__.id, member__.global_name, member__.guild_name]
+                out = [member__]
                 return out
     elif isinstance(search_term, str):
         for member__ in guild.members:
             if member__.global_name == search_term:
-                out = [member__, member__.id, member__.global_name, member__.guild_name]
+                out = [member__]
                 return out
         for member__ in guild.members:
-            if member__.guild_name == search_term:
-                out = [member__, member__.id, member__.global_name, member__.guild_name]
+            if member__.display_name == search_term:
+                out = [member__]
                 return out
+        for member__ in guild.members:
+            if member__.name == search_term:
+                out = [member__]
+                return out
+
+    else:
+        return None
