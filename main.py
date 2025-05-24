@@ -5,6 +5,7 @@ import os
 import random
 import re
 import time
+import math
 from asyncio import sleep
 from itertools import combinations
 from typing import Optional, Union
@@ -634,30 +635,87 @@ async def create_match_channels(ctx, Team_1, Team_2, match_id, delete_after,
 
 
 def load_all_players():
+    """Load all players across all servers"""
     unsorted_leaderboard = {}
-    new_player_list = []
+
+    # Get all files from object storage
     player_list = client.list()
-    player_list = player_list[2:]
-    print(player_list)
-    for i in range(len(player_list)):
-        new_player_list.append(player_list[i].name.split('/'))
-        print(new_player_list[i])
-        new_player_list[i][2] = new_player_list[i][2].split(".")[0]
-        print(f"index {i}: {new_player_list[i]}")
-    try:
-        for file_name in new_player_list:
-            player = Player.load_from_json(filename=file_name[1],
-                                           username=file_name[2])
-            unsorted_leaderboard[player.dis_name] = player.elo
-    except ObjectNotFoundError:
-        print("No player data found.")
-    except Exception as e:
-        print(f"An error occurred: {str(e)}")
+    print(f"Total files found: {len(player_list)}")
+
+    # Filter for player_data files only (remove the problematic [2:] slice)
+    player_files = [item for item in player_list if item.name.startswith('player_data/')]
+    print(f"Player data files found: {len(player_files)}")
+
+    successful_loads = 0
+    failed_loads = 0
+
+    for player_file in player_files:
+        try:
+            # Parse path: player_data/server_id/username.json
+            path_parts = player_file.name.split('/')
+            if len(path_parts) >= 3:
+                server_id = path_parts[1]
+                username = path_parts[2].split('.')[0]  # Remove .json extension
+
+                player = Player.load_from_json(filename=server_id, username=username)
+                if player and hasattr(player, 'dis_name') and hasattr(player, 'elo'):
+                    unsorted_leaderboard[player.dis_name] = player.elo
+                    successful_loads += 1
+                else:
+                    failed_loads += 1
+        except Exception as e:
+            print(f"Failed to load player from {player_file.name}: {str(e)}")
+            failed_loads += 1
+
+    print(f"Successfully loaded: {successful_loads}, Failed: {failed_loads}")
     return unsorted_leaderboard
 
 
-def get_sorted_leaderboard():
-    unsorted_leaderboard = load_all_players()
+def load_players_for_server(server_id):
+    """Load players only for a specific server - recommended for server-specific leaderboards"""
+    unsorted_leaderboard = {}
+
+    # Get all files from object storage
+    player_list = client.list()
+
+    # Filter for current server's player data files
+    server_player_files = [
+        item for item in player_list
+        if item.name.startswith(f'player_data/{server_id}/')
+    ]
+
+    print(f"Found {len(server_player_files)} player files for server {server_id}")
+
+    successful_loads = 0
+    failed_loads = 0
+
+    for player_file in server_player_files:
+        try:
+            # Extract username from path: player_data/server_id/username.json
+            username = player_file.name.split('/')[-1].split('.')[0]
+
+            player = Player.load_from_json(filename=str(server_id), username=username)
+            if player and hasattr(player, 'dis_name') and hasattr(player, 'elo'):
+                unsorted_leaderboard[player.dis_name] = player.elo
+                successful_loads += 1
+            else:
+                print(f"Invalid player data for {username}")
+                failed_loads += 1
+        except Exception as e:
+            print(f"Failed to load player from {player_file.name}: {str(e)}")
+            failed_loads += 1
+
+    print(f"Server {server_id} - Successfully loaded: {successful_loads}, Failed: {failed_loads}")
+    return unsorted_leaderboard
+
+
+def get_sorted_leaderboard(server_id=None):
+    """Get sorted leaderboard, optionally filtered by server"""
+    if server_id:
+        unsorted_leaderboard = load_players_for_server(server_id)
+    else:
+        unsorted_leaderboard = load_all_players()
+
     sorted_leaderboard = dict(
         sorted(unsorted_leaderboard.items(),
                key=lambda item: int(item[1]),
@@ -815,67 +873,166 @@ async def feature_request(ctx, *, arg):
 
 
 # Command to show the leaderboard
+# Replace your existing leaderboard command with this fixed version
+
 @bot.command(name='leaderboard', help='Display the leaderboard sorted by ELO')
 async def leaderboard(ctx, arg: Union[int, str] = 1):
     page = 1
     find_name = None
 
-    print(arg)
+    print(f"Leaderboard command called with arg: {arg}")
+
     if arg is not None:
         if isinstance(arg, int):
             page = arg
-            print("page is int")
-        elif arg.startswith("<") and arg.endswith(">"):
-            print("arg is discord object")
-            dis_id = arg.strip("<@").strip(">")
-            find_name = await bot.fetch_user(int(dis_id))
-            print(f"looking for {find_name}")
+            print(f"Page is int: {page}")
+        elif isinstance(arg, str) and arg.startswith("<") and arg.endswith(">"):
+            print("Arg is discord mention")
+            dis_id = arg.strip("<@!").strip("<@").strip(">")
+            try:
+                find_name = await bot.fetch_user(int(dis_id))
+                find_name = find_name.name
+                print(f"Looking for user: {find_name}")
+            except:
+                await ctx.send("❌ Could not find that user.")
+                return
         else:
-            find_name = str(arg)
-            find_name = find_name.lower()
-            print(f"leaderboard looking for name {find_name}")
+            find_name = str(arg).lower()
+            print(f"Looking for name: {find_name}")
 
-    leaderboard = client.download_as_text('leaderboard')  # download as str
-    leaderboard = json.loads(leaderboard)  # convert back to a dict
-    # print(leaderboard)
-    rank_dist = distribute_ranks(leaderboard)
+    try:
+        # Try server-specific leaderboard first
+        leaderboard_key = f'leaderboard_{ctx.guild.id}'
+        try:
+            leaderboard = client.download_as_text(leaderboard_key)
+            leaderboard = json.loads(leaderboard)
+        except:
+            # Fall back to global leaderboard or create new one
+            print("Server-specific leaderboard not found, creating new one...")
+            leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
+            client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+
+    except Exception as e:
+        await ctx.send("❌ Error loading leaderboard data.")
+        print(f"Error loading leaderboard: {e}")
+        return
 
     if not leaderboard:
-        await ctx.send("No players found.")
+        await ctx.send("No players found. Use `$make_leaderboard` to create one.")
         return
+
+    # Calculate total pages correctly using ceiling division
+    total_pages = math.ceil(len(leaderboard) / 10)
+
+    # If searching for a specific player
+    if find_name:
+        found_player = False
+        for rank, (name, elo) in enumerate(leaderboard.items(), start=1):
+            # Check both exact match and case-insensitive partial match
+            if (name.lower() == find_name.lower() or
+                    find_name.lower() in name.lower()):
+
+                # Get rank distribution for emoji
+                rank_dist = distribute_ranks(leaderboard)
+                emoji = get(ctx.guild.emojis, name=rank_dist[rank - 1])
+                rank_emoji = emoji if emoji else ""
+
+                embed = discord.Embed(
+                    title="Player Found!",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Player", value=name, inline=True)
+                embed.add_field(name="Rank", value=f"#{rank}", inline=True)
+                embed.add_field(name="ELO", value=str(elo), inline=True)
+
+                if rank_emoji:
+                    embed.add_field(name="Tier", value=f"{rank_emoji} {rank_dist[rank - 1]}", inline=True)
+
+                # Calculate which page this player would be on
+                player_page = math.ceil(rank / 10)
+                embed.add_field(name="Page", value=f"{player_page}/{total_pages}", inline=True)
+
+                await ctx.send(embed=embed)
+                found_player = True
+                break
+
+        if not found_player:
+            await ctx.send(f"❌ Player '{find_name}' not found in the leaderboard.")
+        return
+
+    # Validate page number
+    if page < 1:
+        page = 1
+    elif page > total_pages:
+        page = total_pages
+
+    # Get rank distribution
+    rank_dist = distribute_ranks(leaderboard)
+
+    # Create leaderboard embed
     emoji = get(ctx.message.guild.emojis, name="CP")
-    embed = discord.Embed(title=f"Leaderboard {emoji}",
-                          description=f"Page {page}/{len(leaderboard) // 10} \n Last Update: {(datetime.datetime.now() - leaderboard_update_time).total_seconds()//60} minutes ago",
-                          color=discord.Color.yellow())
-    #table = f"Last Update: {(datetime.datetime.now() - leaderboard_update_time).total_seconds()//60} minutes ago"
+    embed = discord.Embed(
+        title=f"Leaderboard {emoji if emoji else '🏆'}",
+        description=f"Page {page}/{total_pages} \nLast Update: {int((datetime.datetime.now() - leaderboard_update_time).total_seconds() // 60)} minutes ago",
+        color=discord.Color.yellow()
+    )
+
+    # Build the leaderboard table
     table = "`Rank |  Name      |  ELO`\n"
     table += "`---------------------------`\n"
 
-    for rank, (name, elo) in enumerate(leaderboard.items(), start=1):
-        if str(find_name) == name:
-            await ctx.send(f"{name} is rank {rank} with an elo of {elo}")
-            print(f"{name} is rank {rank} with an elo of {elo}")
-            return
+    # Calculate start and end positions for current page
+    start_rank = (page - 1) * 10 + 1
+    end_rank = min(page * 10, len(leaderboard))
 
-        if rank > (page * 10 - 10):
+    current_rank = 0
+    for name, elo in leaderboard.items():
+        current_rank += 1
+
+        # Only show players for the current page
+        if start_rank <= current_rank <= end_rank:
             truncated_name = name[:9]  # Truncate the name if necessary
-            elo = str(elo)[:4]  # Truncate the ELO if necessary
-            emoji = get(ctx.message.guild.emojis, name=rank_dist[rank - 1])
-            table += f"{str(emoji)}`{rank:<3}|  {truncated_name:<{10}}|  {elo:<{4}}`\n"
-        if rank > page * 10 and not find_name:
-            break
-    if not find_name:
-        embed.add_field(name="Leaderboard", value=f"{table}", inline=False)
-        await ctx.send(embed=embed)
+            elo_str = str(elo)[:4]  # Truncate the ELO if necessary
+
+            # Get rank emoji (make sure we don't go out of bounds)
+            if current_rank <= len(rank_dist):
+                emoji = get(ctx.message.guild.emojis, name=rank_dist[current_rank - 1])
+                emoji_str = str(emoji) if emoji else "🔸"
+            else:
+                emoji_str = "🔸"
+
+            table += f"{emoji_str}`{current_rank:<3}|  {truncated_name:<{10}}|  {elo_str:<{4}}`\n"
+
+    embed.add_field(name="Rankings", value=f"{table}", inline=False)
+
+    # Add navigation hints
+    if total_pages > 1:
+        nav_text = f"Use `$leaderboard {page - 1 if page > 1 else page}` or `$leaderboard {page + 1 if page < total_pages else page}` to navigate"
+        embed.set_footer(text=nav_text)
+
+    await ctx.send(embed=embed)
 
 
 @bot.command(name='make_leaderboard', help='create the leaderboard')
 @commands.has_permissions(administrator=True)
 async def make_leaderboard(ctx):
-    leaderboard = get_sorted_leaderboard()
-    client.upload_from_text('leaderboard', json.dumps(leaderboard))
+    await ctx.send("🔄 Creating leaderboard...")
+
+    # Use server-specific leaderboard
+    leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
+
+    # Store with server-specific key
+    leaderboard_key = f'leaderboard_{ctx.guild.id}'
+    client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+
+    global leaderboard_update_time
     leaderboard_update_time = datetime.datetime.now()
-    await ctx.send("Leaderboard updated ✅")
+
+    embed = discord.Embed(title="Leaderboard Updated ✅", color=discord.Color.green())
+    embed.add_field(name="Players Found", value=str(len(leaderboard)), inline=True)
+    embed.add_field(name="Server ID", value=str(ctx.guild.id), inline=True)
+
+    await ctx.send(embed=embed)
 
 
 @bot.command(name='DataBase', help='Refactor the DB')
@@ -889,6 +1046,264 @@ async def DataBase(ctx):
             file_.save_to_json(guild, member.id)
             print(f"saved {file_} as {member.id}")
 
+
+@bot.command(name='adjust_elo',
+             aliases=['elo', 'adjust'],
+             help='Manually adjust a player\'s ELO points')
+@commands.has_permissions(administrator=True)
+async def adjust_elo(ctx, user: discord.Member, amount: int):
+    """
+    Manually adjust a player's ELO and update the leaderboard
+    Usage: $adjust_elo @player +50 or $adjust_elo @player -25
+    """
+    try:
+        # Use sanitized filename to match how the data is stored
+        sanitized_username = Player.sanitize_filename(user.name)
+
+        # Load the player's profile using the sanitized name
+        player = Player.load_from_json(ctx.guild.id, sanitized_username)
+
+        if player is None:
+            await ctx.send(f"❌ No profile found for {user.display_name}. They need to use `$setup_profile` first.")
+            return
+
+        # Store old ELO for comparison
+        old_elo = player.elo
+
+        # Adjust the ELO
+        player.elo += amount
+
+        # Prevent negative ELO
+        if player.elo < 0:
+            player.elo = 0
+
+        # Save the updated player data using the sanitized name
+        player.save_to_json(ctx.guild.id, sanitized_username)
+
+        # Update the leaderboard
+        leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
+        leaderboard_key = f'leaderboard_{ctx.guild.id}'
+        client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+        global leaderboard_update_time
+        leaderboard_update_time = datetime.datetime.now()
+
+        # Create embed for confirmation
+        embed = discord.Embed(
+            title="ELO Adjustment Complete",
+            color=discord.Color.green() if amount > 0 else discord.Color.red()
+        )
+        embed.add_field(name="Player", value=user.mention, inline=True)
+        embed.add_field(name="Previous ELO", value=str(old_elo), inline=True)
+        embed.add_field(name="Adjustment", value=f"{'+' if amount > 0 else ''}{amount}", inline=True)
+        embed.add_field(name="New ELO", value=str(player.elo), inline=True)
+        embed.add_field(name="Change", value=f"{old_elo} → {player.elo}", inline=False)
+        embed.set_footer(text=f"Adjusted by {ctx.author.display_name}")
+
+        await ctx.send(embed=embed)
+        print(f"ELO adjusted for {user.name}: {old_elo} → {player.elo} (change: {amount})")
+
+    except Exception as e:
+        await ctx.send(f"❌ An error occurred while adjusting ELO: {str(e)}")
+        print(f"Error adjusting ELO for {user.name}: {e}")
+
+@bot.command(name='debug_players', help='Debug command to check player data')
+@commands.has_permissions(administrator=True)
+async def debug_players(ctx):
+    """Debug command to check how many players are actually stored"""
+    try:
+        # Get raw player list from object storage
+        player_list = client.list()
+        print(f"Raw client.list() result: {player_list}")
+
+        # Filter for player data files
+        player_files = [item for item in player_list if item.name.startswith('player_data/')]
+
+        embed = discord.Embed(title="Player Data Debug", color=discord.Color.orange())
+        embed.add_field(name="Total Files in Storage", value=str(len(player_list)), inline=True)
+        embed.add_field(name="Player Data Files", value=str(len(player_files)), inline=True)
+
+        # Count players per server
+        server_counts = {}
+        for file_item in player_files:
+            parts = file_item.name.split('/')
+            if len(parts) >= 3:  # player_data/server_id/player.json
+                server_id = parts[1]
+                server_counts[server_id] = server_counts.get(server_id, 0) + 1
+
+        embed.add_field(name="Players in Current Server",
+                        value=str(server_counts.get(str(ctx.guild.id), 0)), inline=True)
+
+        # Show first few player files for current server
+        current_server_files = [f for f in player_files if f.name.startswith(f'player_data/{ctx.guild.id}/')]
+        if current_server_files:
+            sample_files = current_server_files[:5]  # Show first 5
+            file_names = '\n'.join([f.name.split('/')[-1] for f in sample_files])
+            embed.add_field(name="Sample Player Files", value=f"```{file_names}```", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Debug error: {str(e)}")
+        print(f"Debug error: {e}")
+
+
+@bot.command(name='debug_leaderboard', help='Debug the leaderboard generation process')
+@commands.has_permissions(administrator=True)
+async def debug_leaderboard(ctx):
+    """Debug the leaderboard generation step by step"""
+    try:
+        embed = discord.Embed(title="Leaderboard Debug", color=discord.Color.orange())
+
+        # Step 1: Check stored leaderboard
+        try:
+            stored_leaderboard = client.download_as_text('leaderboard')
+            stored_data = json.loads(stored_leaderboard)
+            embed.add_field(name="Stored Leaderboard Players",
+                            value=str(len(stored_data)), inline=True)
+        except Exception as e:
+            embed.add_field(name="Stored Leaderboard Error", value=str(e), inline=True)
+            stored_data = {}
+
+        # Step 2: Generate fresh leaderboard
+        try:
+            fresh_leaderboard = load_all_players()
+            embed.add_field(name="Fresh Load Players",
+                            value=str(len(fresh_leaderboard)), inline=True)
+        except Exception as e:
+            embed.add_field(name="Fresh Load Error", value=str(e), inline=True)
+            fresh_leaderboard = {}
+
+        # Step 3: Compare
+        if stored_data and fresh_leaderboard:
+            missing_from_stored = set(fresh_leaderboard.keys()) - set(stored_data.keys())
+            missing_from_fresh = set(stored_data.keys()) - set(fresh_leaderboard.keys())
+
+            if missing_from_stored:
+                embed.add_field(name="Missing from Stored",
+                                value=f"{len(missing_from_stored)} players", inline=True)
+            if missing_from_fresh:
+                embed.add_field(name="Missing from Fresh",
+                                value=f"{len(missing_from_fresh)} players", inline=True)
+
+        # Step 4: Show the load_all_players process details
+        await ctx.send(embed=embed)
+
+        # Step 5: Show detailed load process
+        await debug_load_process(ctx)
+
+    except Exception as e:
+        await ctx.send(f"❌ Leaderboard debug error: {str(e)}")
+        print(f"Leaderboard debug error: {e}")
+
+
+async def debug_load_process(ctx):
+    """Debug the load_all_players function step by step"""
+    try:
+        embed = discord.Embed(title="Load Process Debug", color=discord.Color.blue())
+
+        # Replicate load_all_players step by step
+        unsorted_leaderboard = {}
+        new_player_list = []
+
+        # Step 1: Get player list
+        player_list = client.list()
+        embed.add_field(name="1. Total Files", value=str(len(player_list)), inline=True)
+
+        # Step 2: Filter and process
+        player_list = player_list[2:]  # This line might be problematic!
+        embed.add_field(name="2. After [2:] slice", value=str(len(player_list)), inline=True)
+
+        # Step 3: Process file names
+        for i in range(len(player_list)):
+            new_player_list.append(player_list[i].name.split('/'))
+            if len(new_player_list[i]) >= 3:
+                new_player_list[i][2] = new_player_list[i][2].split(".")[0]
+
+        # Filter for current server
+        current_server_files = [item for item in new_player_list
+                                if len(item) >= 3 and item[0] == 'player_data' and item[1] == str(ctx.guild.id)]
+
+        embed.add_field(name="3. Current Server Files",
+                        value=str(len(current_server_files)), inline=True)
+
+        # Step 4: Try to load each player
+        successful_loads = 0
+        failed_loads = 0
+
+        for file_name in current_server_files[:10]:  # Check first 10
+            try:
+                player = Player.load_from_json(filename=file_name[1], username=file_name[2])
+                if player:
+                    successful_loads += 1
+                else:
+                    failed_loads += 1
+            except Exception as e:
+                failed_loads += 1
+                print(f"Failed to load {file_name}: {e}")
+
+        embed.add_field(name="4. Sample Load Results",
+                        value=f"✅ {successful_loads} / ❌ {failed_loads}", inline=True)
+
+        # Show some sample file names
+        if current_server_files:
+            sample_names = ['/'.join(f) for f in current_server_files[:5]]
+            embed.add_field(name="Sample File Paths",
+                            value=f"```{chr(10).join(sample_names)}```", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Load process debug error: {str(e)}")
+        print(f"Load process debug error: {e}")
+
+
+@bot.command(name='rebuild_leaderboard', help='Force rebuild the leaderboard from all player data')
+@commands.has_permissions(administrator=True)
+async def rebuild_leaderboard(ctx):
+    """Rebuild the leaderboard from scratch"""
+    try:
+        await ctx.send("🔄 Rebuilding leaderboard from all player data...")
+
+        # Get fresh leaderboard
+        fresh_leaderboard = load_all_players()
+
+        if not fresh_leaderboard:
+            await ctx.send("❌ No player data found to rebuild leaderboard.")
+            return
+
+        # Sort it
+        sorted_leaderboard = dict(
+            sorted(fresh_leaderboard.items(),
+                   key=lambda item: int(item[1]),
+                   reverse=True)
+        )
+
+        # Save it
+        client.upload_from_text('leaderboard', json.dumps(sorted_leaderboard))
+        global leaderboard_update_time
+        leaderboard_update_time = datetime.datetime.now()
+
+        embed = discord.Embed(title="Leaderboard Rebuilt ✅", color=discord.Color.green())
+        embed.add_field(name="Players Found", value=str(len(sorted_leaderboard)), inline=True)
+        embed.add_field(name="Pages", value=str(math.ceil(len(sorted_leaderboard) / 10)), inline=True)
+
+        await ctx.send(embed=embed)
+
+        # Show top 5 for verification
+        top_5 = list(sorted_leaderboard.items())[:5]
+        top_5_text = '\n'.join([f"{i + 1}. {name}: {elo}" for i, (name, elo) in enumerate(top_5)])
+
+        verification_embed = discord.Embed(title="Top 5 Verification", color=discord.Color.blue())
+        verification_embed.add_field(name="Rankings", value=f"```{top_5_text}```", inline=False)
+        await ctx.send(embed=verification_embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Rebuild error: {str(e)}")
+        print(f"Rebuild error: {e}")
+
+
+# Import math at the top of the file if not already imported
+# import math
 
 # Run the bot
 bot.run(os.environ['DISCORD_KEY'])
