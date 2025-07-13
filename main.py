@@ -8,7 +8,7 @@ import time
 import math
 from asyncio import sleep
 from itertools import combinations
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import discord
 import numpy as np
@@ -61,6 +61,47 @@ bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 # Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
+
+
+def has_permission_ctx(ctx, **options):
+    """
+    Permission checker for prefix commands (uses ctx instead of interaction)
+    """
+    member = ctx.author
+    user = ctx.author
+
+    # Check if user is bot owner (highest priority)
+    if options.get('bot_owner_ids') and user.id in options['bot_owner_ids']:
+        return True
+
+    # For guild-specific checks
+    if ctx.guild and isinstance(member, discord.Member):
+        # Check if user is server admin
+        if options.get('require_admin') and member.guild_permissions.administrator:
+            return True
+
+        # Check if user has manage server permission
+        if options.get('require_manage_server') and member.guild_permissions.manage_guild:
+            return True
+
+        # Check specific roles
+        if options.get('required_roles'):
+            if any(role.name in options['required_roles'] or role.id in options['required_roles']
+                   for role in member.roles):
+                return True
+
+        # Check if user has any of the specified permissions
+        if options.get('required_permissions'):
+            for perm_name in options['required_permissions']:
+                if hasattr(member.guild_permissions, perm_name):
+                    if getattr(member.guild_permissions, perm_name):
+                        return True
+
+    # Check specific user IDs
+    if options.get('allowed_user_ids') and user.id in options['allowed_user_ids']:
+        return True
+
+    return False
 
 
 # Classes:
@@ -356,13 +397,25 @@ class LView(View):
 
 # Command to create a new LFG queue with the updated QView
 @bot.command()
-@commands.has_permissions(administrator=True)
-async def lfg(ctx, region, system):
+async def lfg(ctx, region, system):  # Removed interaction parameter
+    permission_options = {
+        'require_admin': False,
+        'allowed_user_ids': [21084091485834444],
+        'required_roles': ['Helper'],
+        'bot_owner_ids': []
+    }
+
+    # Use ctx instead of interaction for permission checking
+    if not has_permission_ctx(ctx, **permission_options):
+        await ctx.send("You need staff permissions to use this command.")
+        return
+
     GID = generate_match_id()
     if system.upper() == "PC":
         syscolor = discord.Color.dark_red()
     else:
         syscolor = discord.Color.dark_blue()
+
     embed = discord.Embed(title=f" Queue for {str(region).upper()}",
                           color=syscolor)
 
@@ -1422,4 +1475,3 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
 
 
 # Run the bot
-bot.run(os.environ['DISCORD_KEY'])
