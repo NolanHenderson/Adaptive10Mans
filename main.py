@@ -59,7 +59,9 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
+# Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
+
 
 # Classes:
 class QView(View):
@@ -74,8 +76,8 @@ class QView(View):
         self.GID = GID
         self.last_join_time = datetime.datetime.now()  # Track whaen the last player joined
         self.timeout_task = asyncio.create_task(self.check_queue_timeout())  # Start timeout checker
-        self.queue_timeout = 3600*3  # 1 hour timeout * n
-        #self.queue_timeout = 60 # 1 Minute
+        self.queue_timeout = 3600 * 3  # 1 hour timeout * n
+        # self.queue_timeout = 60 # 1 Minute
         self.timeout_warning_sent = False  # Flag to track if a warning was sent
 
     def get_player_list(self):
@@ -791,21 +793,21 @@ async def setup_profiles(ctx):
         print(f"Collected Ubisoft name: {ubi_name}")
 
         region = "US East"
-        #await ask_user_for_input(
+        # await ask_user_for_input(
         #    new_user, "Please enter your region from this list:\n"
         #              "(Asia East, Asia South East, Japan East, South Africa North, "
         #               "UAE North, EU West, EU North, US East, US Central, US West, "
         #                 "US South Central, Brazil South, Australia East)")
-        #if region.lower() in [r.lower() for r in list_of_regions]:
+        # if region.lower() in [r.lower() for r in list_of_regions]:
         #    print(f"Collected region: {region}")
-        #else:
+        # else:
         #    await new_user.send(
         #        "Invalid region. Please use !setup profile again.")
         #    return
 
         system = await ask_user_for_input(
             new_user, "Please enter your system:\n"
-            '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
+                      '(PC, Xbox, PS. if you play on multiple, say: "PC PS")')
         if system.lower() in [stm.lower() for stm in list_of_systems]:
             pass
         else:
@@ -817,7 +819,7 @@ async def setup_profiles(ctx):
         #        await ask_user_for_input(
         #    new_user, "Please enter your rank:\n"
         #              "(Use the form G1 for Gold 1, P3 for Plat 3, etc... Use D1 for champ.)"
-        #)
+        # )
         if rank.lower() in [rnk.lower() for rnk in list_of_ranks]:
             print(f"Collected rank: {rank}")
         else:
@@ -1073,7 +1075,7 @@ async def adjust_elo(ctx, user: discord.Member, amount: int):
         # Adjust the ELO
         player.elo += amount
 
-        # Prevent negative ELO
+        # Prevent negative ELO (optional - remove if you want to allow negative ELO)
         if player.elo < 0:
             player.elo = 0
 
@@ -1105,6 +1107,7 @@ async def adjust_elo(ctx, user: discord.Member, amount: int):
     except Exception as e:
         await ctx.send(f"❌ An error occurred while adjusting ELO: {str(e)}")
         print(f"Error adjusting ELO for {user.name}: {e}")
+
 
 @bot.command(name='debug_players', help='Debug command to check player data')
 @commands.has_permissions(administrator=True)
@@ -1302,8 +1305,121 @@ async def rebuild_leaderboard(ctx):
         print(f"Rebuild error: {e}")
 
 
-# Import math at the top of the file if not already imported
-# import math
+@bot.command(name='ban', help='Display player information for potential ban')
+@commands.has_permissions(administrator=True)
+async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
+    """
+    Ban command to find and display player information
+    Usage: $ban @player reason or $ban "player_name" reason
+    """
+    try:
+        target_user = None
+        player_data = None
+
+        # Try to parse as Discord mention first
+        if player_identifier.startswith("<@") and player_identifier.endswith(">"):
+            # Extract user ID from mention
+            user_id = player_identifier.strip("<@!").strip("<@").strip(">")
+            try:
+                target_user = await bot.fetch_user(int(user_id))
+            except:
+                await ctx.send("❌ Could not find that Discord user.")
+                return
+        else:
+            # Try to find by display name or username
+            target_user = discord.utils.get(ctx.guild.members, display_name=player_identifier)
+            if not target_user:
+                target_user = discord.utils.get(ctx.guild.members, name=player_identifier)
+
+        if not target_user:
+            await ctx.send(f"❌ Could not find Discord user: `{player_identifier}`")
+            return
+
+        # Load player profile data
+        sanitized_username = Player.sanitize_filename(target_user.name)
+        player_data = Player.load_from_json(ctx.guild.id, sanitized_username)
+
+        # Create embed with player information
+        embed = discord.Embed(
+            title="🚫 Player Ban Information",
+            color=discord.Color.red(),
+            timestamp=datetime.datetime.now()
+        )
+
+        # Discord Information
+        embed.add_field(
+            name="Discord Information",
+            value=f"**Name:** {target_user.name}\n"
+                  f"**Display Name:** {target_user.display_name}\n"
+                  f"**User ID:** {target_user.id}\n"
+                  f"**Mention:** {target_user.mention}",
+            inline=False
+        )
+
+        # Player Profile Information
+        if player_data:
+            # Get rank emoji if available
+            rank_emoji = get(ctx.guild.emojis, name=player_data.rank)
+            rank_display = f"{rank_emoji} {player_data.rank}" if rank_emoji else player_data.rank
+
+            # Calculate win rate
+            total_games = player_data.wins + player_data.losses
+            win_rate = (player_data.wins / total_games * 100) if total_games > 0 else 0
+
+            embed.add_field(
+                name="Game Profile",
+                value=f"**Ubisoft Name:** {player_data.ubi_name}\n"
+                      f"**ELO:** {player_data.elo}\n"
+                      f"**Rank:** {rank_display}\n"
+                      f"**Region:** {player_data.region}\n"
+                      f"**System:** {player_data.system}",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Match Statistics",
+                value=f"**Wins:** {player_data.wins}\n"
+                      f"**Losses:** {player_data.losses}\n"
+                      f"**Total Games:** {total_games}\n"
+                      f"**Win Rate:** {win_rate:.1f}%",
+                inline=True
+            )
+        else:
+            embed.add_field(
+                name="Game Profile",
+                value="❌ No profile found\n*Player has not used `$setup_profile`*",
+                inline=False
+            )
+
+        # Ban Information
+        embed.add_field(
+            name="Ban Details",
+            value=f"**Reason:** {reason}\n"
+                  f"**Requested by:** {ctx.author.mention}\n"
+                  f"**Server:** {ctx.guild.name}",
+            inline=False
+        )
+
+        # Add thumbnail (user avatar)
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+
+        # Add footer
+        embed.set_footer(
+            text=f"Action pending • Server ID: {ctx.guild.id}",
+            icon_url=ctx.guild.icon.url if ctx.guild.icon else None
+        )
+
+        await ctx.send(embed=embed)
+
+        # Log to console for debugging
+        print(f"Ban command executed by {ctx.author.name} for {target_user.name}")
+        print(f"Reason: {reason}")
+        print(f"Player data found: {'Yes' if player_data else 'No'}")
+
+    except Exception as e:
+        await ctx.send(f"❌ An error occurred while processing the ban command: {str(e)}")
+        print(f"Error in ban command: {e}")
+
 
 # Run the bot
 bot.run(os.environ['DISCORD_KEY'])
