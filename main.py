@@ -20,8 +20,6 @@ from discord.utils import get
 from replit.object_storage import Client
 from replit.object_storage.errors import ObjectNotFoundError
 
-from JSON_helper import *
-
 from Dis_Lookup import search_player
 
 client = Client()  # Create a client instance
@@ -59,7 +57,7 @@ maps = [
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
+bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 # Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
@@ -140,9 +138,13 @@ class QView(View):
         try:
             embed = self.embed_message.embeds[0]
             user = interaction.user
-            guild_id = interaction.guild.id
+            player = check_profile(self.server_id, user)
 
-            player = await load_or_create_player(guild_id, user)
+            if player is not None and player != "NUP":
+                rank_emoji = get(interaction.guild.emojis, name=player.rank)
+                player_entry = f"{rank_emoji} @{user.display_name} ({user.display_name})" if rank_emoji else f"@{user.display_name} ({user.display_name})"
+            else:
+                player_entry = f"@{user.display_name} ({user.display_name})"
 
             if user not in self.player_list:
                 self.player_list.append(user)
@@ -158,22 +160,16 @@ class QView(View):
 
             if len(self.player_list) >= match_size:
                 print(self.player_list)
-                roster = []
-                for p in self.player_list:
-                    loaded = await load_or_create_player(guild_id, p)
-                    if loaded is None:
-                        await interaction.response.send_message(f"Could not load profile for {p}", ephemeral=True)
-                        return
-                    roster.append(loaded)
-
+                roster = [Player.load_from_json(self.server_id, p.name) for p in self.player_list]
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
                 members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
-                Team_1 = [discord.utils.get(self.ctx.guild.members, name=p.dis_name) for p in Team_1]
-                Team_2 = [discord.utils.get(self.ctx.guild.members, name=p.dis_name) for p in Team_2]
-
+                for mem in range(len(Team_1)):
+                    Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
+                for mem in range(len(Team_2)):
+                    Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
                 await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
@@ -450,19 +446,16 @@ class Player:
         self.system = system
 
     def to_dict(self):
-        return self.__dict__
-
-    @staticmethod
-    def default(dis_name):
+        """Convert the Player instance to a dictionary."""
         return {
-            'ubi_name': "unknown",
-            'dis_name': dis_name,
-            'elo': 1000,
-            'wins': 0,
-            'losses': 0,
-            'rank': "Null",
-            'region': "Null",
-            'system': "Null"
+            'ubi_name': self.ubi_name,
+            'dis_name': self.dis_name,
+            'elo': self.elo,
+            'wins': self.wins,
+            'losses': self.losses,
+            'rank': self.rank,
+            'region': self.region,
+            'system': self.system
         }
 
     @classmethod
@@ -1482,4 +1475,3 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
 
 
 # Run the bot
-bot.run(os.environ['DISCORD_KEY'])
