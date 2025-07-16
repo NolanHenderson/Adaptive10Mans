@@ -400,7 +400,7 @@ class LView(View):
 async def lfg(ctx, region, system):  # Removed interaction parameter
     permission_options = {
         'require_admin': False,
-        'allowed_user_ids': [21084091485834444],
+        'allowed_user_ids': [210840914858344448],
         'required_roles': ['Helper'],
         'bot_owner_ids': []
     }
@@ -973,7 +973,7 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
         return
 
     if not leaderboard:
-        await ctx.send("No players found. Use `$make_leaderboard` to create one.")
+        await ctx.send("No players found. Use `!make_leaderboard` to create one.")
         return
 
     # Calculate total pages correctly using ceiling division
@@ -1069,8 +1069,19 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
 
 @bot.command(name='make_leaderboard', help='create the leaderboard')
-@commands.has_permissions(administrator=True)
 async def make_leaderboard(ctx):
+    permission_options = {
+        'require_admin': False,
+        'allowed_user_ids': [210840914858344448],
+        'required_roles': ['Helper'],
+        'bot_owner_ids': []
+    }
+
+    # Use ctx instead of interaction for permission checking
+    if not has_permission_ctx(ctx, **permission_options):
+        await ctx.send("You need staff permissions to use this command.")
+        return
+
     await ctx.send("🔄 Creating leaderboard...")
 
     # Use server-specific leaderboard
