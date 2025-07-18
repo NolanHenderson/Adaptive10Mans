@@ -6,6 +6,7 @@ import random
 import re
 import time
 import math
+import glob
 from asyncio import sleep
 from itertools import combinations
 from typing import Optional, Union, List
@@ -20,11 +21,11 @@ from discord.utils import get
 from replit.object_storage import Client
 from replit.object_storage.errors import ObjectNotFoundError
 
-from JSON_helper import *
+#from JSON_helper import *
 
 from Dis_Lookup import search_player
 
-client = Client()  # Create a client instance
+#client = Client()  # Create a client instance
 role_dict = {}
 match_size = 10
 members = []
@@ -63,6 +64,104 @@ bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
 
 # Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
+
+def upload_leaderboard(guild_id, leaderboard):
+    # Create leaderboards directory if it doesn't exist
+    os.makedirs("leaderboards", exist_ok=True)
+    # Save leaderboard to JSON file
+    leaderboard_filename = f'leaderboard_{guild_id}.json'
+    leaderboard_path = os.path.join("leaderboards", leaderboard_filename)
+    with open(leaderboard_path, 'w', encoding='utf-8') as f:
+        json.dump(leaderboard, f, indent=2, ensure_ascii=False)
+    print(f"Saved leaderboard to {leaderboard_path}")
+
+
+# Load leaderboard function
+def load_leaderboard(guild_id):
+    leaderboard_filename = f'leaderboard_{guild_id}.json'
+    leaderboard_path = os.path.join("leaderboards", leaderboard_filename)
+
+    print(f"Attempting to load leaderboard from: {leaderboard_path}")
+
+    try:
+        with open(leaderboard_path, 'r', encoding='utf-8') as f:
+            leaderboard = json.load(f)
+        return leaderboard
+    except FileNotFoundError:
+        print(f"No leaderboard found for guild {guild_id}")
+        return {}  # Return empty dict if no leaderboard exists
+    except json.JSONDecodeError as e:
+        print(f"Error parsing leaderboard JSON from {leaderboard_path}: {str(e)}")
+        return {}
+    except Exception as e:
+        print(f"Error loading leaderboard from {leaderboard_path}: {str(e)}")
+        return {}
+
+
+def list_saved_files(base_directory=".", pattern="**/*.json"):
+    """
+    List all saved JSON files recursively from the base directory.
+
+    Args:
+        base_directory (str): The root directory to search from (default: current directory)
+        pattern (str): File pattern to match (default: all JSON files recursively)
+
+    Returns:
+        list: List of file paths relative to the base directory
+    """
+    try:
+        # Get all JSON files recursively
+        search_pattern = os.path.join(base_directory, pattern)
+        files = glob.glob(search_pattern, recursive=True)
+
+        # Convert to relative paths and normalize
+        relative_files = []
+        for file in files:
+            # Make path relative to base directory
+            relative_path = os.path.relpath(file, base_directory)
+            # Normalize path separators
+            relative_path = relative_path.replace(os.sep, '/')
+            relative_files.append(relative_path)
+
+        return sorted(relative_files)
+
+    except Exception as e:
+        print(f"Error listing files: {str(e)}")
+        return []
+
+
+def list_player_data_files():
+    """
+    List all player data files specifically.
+
+    Returns:
+        list: List of player data file paths
+    """
+    return list_saved_files("player_data", "**/*.json")
+
+
+def list_leaderboard_files():
+    """
+    List all leaderboard files specifically.
+
+    Returns:
+        list: List of leaderboard file paths
+    """
+    return list_saved_files("leaderboards", "*.json")
+
+
+def list_all_saved_objects():
+    """
+    List all saved objects (both player data and leaderboards).
+
+    Returns:
+        dict: Dictionary with 'player_data' and 'leaderboards' keys containing file lists
+    """
+    return {
+        'player_data': list_player_data_files(),
+        'leaderboards': list_leaderboard_files(),
+        'all_files': list_saved_files()
+    }
 
 
 def has_permission_ctx(ctx, **options):
@@ -140,9 +239,13 @@ class QView(View):
         try:
             embed = self.embed_message.embeds[0]
             user = interaction.user
-            guild_id = interaction.guild.id
+            player = check_profile(self.server_id, user)
 
-            player = await load_or_create_player(guild_id, user)
+            if player is not None and player != "NUP":
+                rank_emoji = get(interaction.guild.emojis, name=player.rank)
+                player_entry = f"{rank_emoji} @{user.display_name} ({user.display_name})" if rank_emoji else f"@{user.display_name} ({user.display_name})"
+            else:
+                player_entry = f"@{user.display_name} ({user.display_name})"
 
             if user not in self.player_list:
                 self.player_list.append(user)
@@ -158,22 +261,16 @@ class QView(View):
 
             if len(self.player_list) >= match_size:
                 print(self.player_list)
-                roster = []
-                for p in self.player_list:
-                    loaded = await load_or_create_player(guild_id, p)
-                    if loaded is None:
-                        await interaction.response.send_message(f"Could not load profile for {p}", ephemeral=True)
-                        return
-                    roster.append(loaded)
-
+                roster = [Player.load_from_json(self.server_id, p.name) for p in self.player_list]
                 self.player_list = []
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
                 members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
-                Team_1 = [discord.utils.get(self.ctx.guild.members, name=p.dis_name) for p in Team_1]
-                Team_2 = [discord.utils.get(self.ctx.guild.members, name=p.dis_name) for p in Team_2]
-
+                for mem in range(len(Team_1)):
+                    Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
+                for mem in range(len(Team_2)):
+                    Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
                 await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
@@ -392,7 +489,7 @@ class LView(View):
         """Automatically update the leaderboard after match completion"""
         try:
             leaderboard = get_sorted_leaderboard()
-            client.upload_from_text('leaderboard', json.dumps(leaderboard))
+            upload_leaderboard(self.ctx.guild.id, leaderboard)
             leaderboard_update_time = datetime.datetime.now()
             print("Leaderboard automatically updated after match completion")
         except Exception as e:
@@ -481,32 +578,45 @@ class Player:
     def sanitize_filename(cls, filename):
         if not isinstance(filename, str):
             filename = filename.dis_name
-            # raise ValueError("filename must be a string")
-        return filename.strip().replace(" ", "_").replace(".", "_")
+        # Replace invalid characters with underscores
+        filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+        # Replace spaces and periods with underscores
+        filename = filename.strip().replace(" ", "_").replace(".", "_")
+        # Avoid empty filename
+        if not filename:
+            raise ValueError("Filename cannot be empty after sanitization.")
+        return filename
 
     def save_to_json(self, filename, username):
         file_safe_name = self.sanitize_filename(username)
-        key = f"player_data/{filename}/{file_safe_name}.json"
-        client.upload_from_text(key, json.dumps(self.to_dict()))
-        print(f"Saved player data to object storage as {key}")
+        # Create directory structure if it doesn't exist
+        directory = f"player_data/{filename}"
+        os.makedirs(directory, exist_ok=True)
+        # Create full file path
+        file_path = os.path.join(directory, f"{file_safe_name}.json")
+        # Write JSON data to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        print(f"Saved player data to {file_path}")
 
     @classmethod
     def load_from_json(cls, filename, username):
         file_safe_name = cls.sanitize_filename(username)
-        key = f"player_data/{filename}/{file_safe_name}.json"
-
-        print(f"Attempting to download player data for key: {key}")
-
+        file_path = os.path.join("player_data", filename, f"{file_safe_name}.json")
+        print(f"Attempting to load player data from: {file_path}")
         try:
-            data = client.download_as_text(key)
-            return cls.from_dict(json.loads(data))
-        except client.ObjectNotFoundError:
-            print(f"No data found for {key}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return cls.from_dict(data)
+        except FileNotFoundError:
+            print(f"No data found for {file_path}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON from {file_path}: {str(e)}")
             return None
         except Exception as e:
-            print(f"Error downloading player data for {key}: {str(e)}")
+            print(f"Error loading player data from {file_path}: {str(e)}")
             return None
-
 
 # Functions:
 # Creates the blurb containing all match info in a new lobby
@@ -701,7 +811,7 @@ def load_all_players():
     unsorted_leaderboard = {}
 
     # Get all files from object storage
-    player_list = client.list()
+    player_list = list_player_data_files()
     print(f"Total files found: {len(player_list)}")
 
     # Filter for player_data files only (remove the problematic [2:] slice)
@@ -738,7 +848,7 @@ def load_players_for_server(server_id):
     unsorted_leaderboard = {}
 
     # Get all files from object storage
-    player_list = client.list()
+    player_list = list_player_data_files()
 
     # Filter for current server's player data files
     server_player_files = [
@@ -964,15 +1074,13 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
     try:
         # Try server-specific leaderboard first
-        leaderboard_key = f'leaderboard_{ctx.guild.id}'
         try:
-            leaderboard = client.download_as_text(leaderboard_key)
-            leaderboard = json.loads(leaderboard)
+            leaderboard = load_leaderboard(ctx.guild.id)
         except:
             # Fall back to global leaderboard or create new one
             print("Server-specific leaderboard not found, creating new one...")
             leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
-            client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+            upload_leaderboard(ctx.guild.id, leaderboard)
 
     except Exception as e:
         await ctx.send("❌ Error loading leaderboard data.")
@@ -1084,8 +1192,7 @@ async def make_leaderboard(ctx):
     leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
 
     # Store with server-specific key
-    leaderboard_key = f'leaderboard_{ctx.guild.id}'
-    client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+    upload_leaderboard(ctx.guild.id, leaderboard)
 
     global leaderboard_update_time
     leaderboard_update_time = datetime.datetime.now()
@@ -1144,8 +1251,7 @@ async def adjust_elo(ctx, user: discord.Member, amount: int):
 
         # Update the leaderboard
         leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
-        leaderboard_key = f'leaderboard_{ctx.guild.id}'
-        client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+        upload_leaderboard(ctx.guild.id, leaderboard)
         global leaderboard_update_time
         leaderboard_update_time = datetime.datetime.now()
 
@@ -1175,8 +1281,8 @@ async def debug_players(ctx):
     """Debug command to check how many players are actually stored"""
     try:
         # Get raw player list from object storage
-        player_list = client.list()
-        print(f"Raw client.list() result: {player_list}")
+        player_list = list_player_data_files()
+        print(f"Raw player list result: {player_list}")
 
         # Filter for player data files
         player_files = [item for item in player_list if item.name.startswith('player_data/')]
@@ -1219,7 +1325,7 @@ async def debug_leaderboard(ctx):
 
         # Step 1: Check stored leaderboard
         try:
-            stored_leaderboard = client.download_as_text('leaderboard')
+            stored_leaderboard = load_leaderboard(ctx.guild.id)
             stored_data = json.loads(stored_leaderboard)
             embed.add_field(name="Stored Leaderboard Players",
                             value=str(len(stored_data)), inline=True)
@@ -1269,7 +1375,7 @@ async def debug_load_process(ctx):
         new_player_list = []
 
         # Step 1: Get player list
-        player_list = client.list()
+        player_list = list_player_data_files()
         embed.add_field(name="1. Total Files", value=str(len(player_list)), inline=True)
 
         # Step 2: Filter and process
@@ -1342,7 +1448,7 @@ async def rebuild_leaderboard(ctx):
         )
 
         # Save it
-        client.upload_from_text('leaderboard', json.dumps(sorted_leaderboard))
+        upload_leaderboard(ctx.guild.id, sorted_leaderboard)
         global leaderboard_update_time
         leaderboard_update_time = datetime.datetime.now()
 
