@@ -60,7 +60,7 @@ maps = [
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", case_insensitive=True, intents=intents)
+bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 
 # Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
@@ -171,39 +171,69 @@ def has_permission_ctx(ctx, **options):
     member = ctx.author
     user = ctx.author
 
+    # Debug: Print what we're checking (remove in production)
+    print(f"Checking permissions for user {user.id} ({user.name})")
+    print(f"Options: {options}")
+
     # Check if user is bot owner (highest priority)
     if options.get('bot_owner_ids') and user.id in options['bot_owner_ids']:
+        print(f"User {user.id} is bot owner")
         return True
+
+    # Check specific user IDs (moved up for higher priority)
+    if options.get('allowed_user_ids'):
+        print(f"Checking allowed_user_ids: {options['allowed_user_ids']}")
+        print(f"User ID {user.id} type: {type(user.id)}")
+
+        # Ensure we're comparing the right types
+        allowed_ids = options['allowed_user_ids']
+        if user.id in allowed_ids:
+            print(f"User {user.id} found in allowed_user_ids")
+            return True
+
+        # Also check if the ID is stored as string vs int
+        if str(user.id) in [str(uid) for uid in allowed_ids]:
+            print(f"User {user.id} found in allowed_user_ids (string comparison)")
+            return True
 
     # For guild-specific checks
     if ctx.guild and isinstance(member, discord.Member):
-        # Check if user is server admin
-        if options.get('require_admin') and member.guild_permissions.administrator:
-            return True
+        # Check if user is server admin (only if this requirement is specified)
+        if options.get('require_admin'):
+            if member.guild_permissions.administrator:
+                print(f"User {user.id} is server admin")
+                return True
 
-        # Check if user has manage server permission
-        if options.get('require_manage_server') and member.guild_permissions.manage_guild:
-            return True
+        # Check if user has manage server permission (only if this requirement is specified)
+        if options.get('require_manage_server'):
+            if member.guild_permissions.manage_guild:
+                print(f"User {user.id} has manage guild permission")
+                return True
 
         # Check specific roles
         if options.get('required_roles'):
-            if any(role.name in options['required_roles'] or role.id in options['required_roles']
-                   for role in member.roles):
-                return True
+            user_role_names = [role.name for role in member.roles]
+            user_role_ids = [role.id for role in member.roles]
+
+            print(f"User roles: {user_role_names}")
+            print(f"Required roles: {options['required_roles']}")
+
+            for required_role in options['required_roles']:
+                if required_role in user_role_names or required_role in user_role_ids:
+                    print(f"User {user.id} has required role: {required_role}")
+                    return True
 
         # Check if user has any of the specified permissions
         if options.get('required_permissions'):
             for perm_name in options['required_permissions']:
                 if hasattr(member.guild_permissions, perm_name):
                     if getattr(member.guild_permissions, perm_name):
+                        print(f"User {user.id} has required permission: {perm_name}")
                         return True
 
-    # Check specific user IDs
-    if options.get('allowed_user_ids') and user.id in options['allowed_user_ids']:
-        return True
-
+    # If no conditions are met, deny access
+    print(f"User {user.id} denied access - no conditions met")
     return False
-
 
 # Classes:
 class QView(View):
@@ -501,7 +531,7 @@ class LView(View):
 async def lfg(ctx, region, system):  # Removed interaction parameter
     permission_options = {
         'require_admin': False,
-        'allowed_user_ids': [21084091485834444],
+        'allowed_user_ids': [210840914858344448],
         'required_roles': ['Helper'],
         'bot_owner_ids': []
     }
@@ -602,15 +632,25 @@ class Player:
     @classmethod
     def load_from_json(cls, filename, username):
         file_safe_name = cls.sanitize_filename(username)
-        file_path = os.path.join("player_data", filename, f"{file_safe_name}.json")
+        file_path = os.path.join("player_data", str(filename), f"{file_safe_name}.json")
         print(f"Attempting to load player data from: {file_path}")
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return cls.from_dict(data)
         except FileNotFoundError:
             print(f"No data found for {file_path}")
-            return None
+            print(f"Creating default player data for {username}")
+
+            # Create a default player instance
+            default_data = cls.default(username)
+            default_player = cls.from_dict(default_data)
+
+            # Save the default player data
+            default_player.save_to_json(filename, username)
+
+            return default_player
         except json.JSONDecodeError as e:
             print(f"Error parsing JSON from {file_path}: {str(e)}")
             return None
@@ -853,7 +893,7 @@ def load_players_for_server(server_id):
     # Filter for current server's player data files
     server_player_files = [
         item for item in player_list
-        if item.name.startswith(f'player_data/{server_id}/')
+        if item.startswith(f'{server_id}/')  # item is already a string path
     ]
 
     print(f"Found {len(server_player_files)} player files for server {server_id}")
@@ -863,8 +903,9 @@ def load_players_for_server(server_id):
 
     for player_file in server_player_files:
         try:
-            # Extract username from path: player_data/server_id/username.json
-            username = player_file.name.split('/')[-1].split('.')[0]
+            # Extract username from path: server_id/username.json
+            # player_file is a string like "server_id/username.json"
+            username = player_file.split('/')[-1].split('.')[0]
 
             player = Player.load_from_json(filename=str(server_id), username=username)
             if player and hasattr(player, 'dis_name') and hasattr(player, 'elo'):
@@ -874,7 +915,7 @@ def load_players_for_server(server_id):
                 print(f"Invalid player data for {username}")
                 failed_loads += 1
         except Exception as e:
-            print(f"Failed to load player from {player_file.name}: {str(e)}")
+            print(f"Failed to load player from {player_file}: {str(e)}")
             failed_loads += 1
 
     print(f"Server {server_id} - Successfully loaded: {successful_loads}, Failed: {failed_loads}")
@@ -1088,7 +1129,7 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
         return
 
     if not leaderboard:
-        await ctx.send("No players found. Use `$make_leaderboard` to create one.")
+        await ctx.send("No players found. Use `!make_leaderboard` to create one.")
         return
 
     # Calculate total pages correctly using ceiling division
@@ -1177,24 +1218,37 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
     # Add navigation hints
     if total_pages > 1:
-        nav_text = f"Use `$leaderboard {page - 1 if page > 1 else page}` or `$leaderboard {page + 1 if page < total_pages else page}` to navigate"
+        nav_text = f"Use `!leaderboard {page - 1 if page > 1 else page}` or `!leaderboard {page + 1 if page < total_pages else page}` to navigate"
         embed.set_footer(text=nav_text)
 
     await ctx.send(embed=embed)
 
 
 @bot.command(name='make_leaderboard', help='create the leaderboard')
-@commands.has_permissions(administrator=True)
 async def make_leaderboard(ctx):
+    permission_options = {
+        'require_admin': False,
+        'allowed_user_ids': [210840914858344448],
+        'required_roles': ['Helper'],
+        'bot_owner_ids': []
+    }
+
+    # Use ctx instead of interaction for permission checking
+    if not has_permission_ctx(ctx, **permission_options):
+        await ctx.send("You need staff permissions to use this command.")
+        return
     await ctx.send("🔄 Creating leaderboard...")
 
     # Use server-specific leaderboard
+    print("Getting sorted leaderboard")
     leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
 
     # Store with server-specific key
+    print("Saving sorted leaderboard to database")
     upload_leaderboard(ctx.guild.id, leaderboard)
 
     global leaderboard_update_time
+    print("Getting timestamp")
     leaderboard_update_time = datetime.datetime.now()
 
     embed = discord.Embed(title="Leaderboard Updated ✅", color=discord.Color.green())
@@ -1223,17 +1277,21 @@ async def DataBase(ctx):
 async def adjust_elo(ctx, user: discord.Member, amount: int):
     """
     Manually adjust a player's ELO and update the leaderboard
-    Usage: $adjust_elo @player +50 or $adjust_elo @player -25
+    Usage: !adjust_elo @player +50 or !adjust_elo @player -25
     """
+    print(f"Attempting to adjust elo for {user.name}")
     try:
         # Use sanitized filename to match how the data is stored
+        print("sanitizing name")
         sanitized_username = Player.sanitize_filename(user.name)
 
         # Load the player's profile using the sanitized name
+        print("Trying to load player data from JSON")
         player = Player.load_from_json(ctx.guild.id, sanitized_username)
-
+        print("Loaded data:")
+        print(player)
         if player is None:
-            await ctx.send(f"❌ No profile found for {user.display_name}. They need to use `$setup_profile` first.")
+            await ctx.send(f"❌ No profile found for {user.display_name}. They need to use `!setup_profile` first.")
             return
 
         # Store old ELO for comparison
@@ -1247,9 +1305,11 @@ async def adjust_elo(ctx, user: discord.Member, amount: int):
             player.elo = 0
 
         # Save the updated player data using the sanitized name
+        print("saving new value to database")
         player.save_to_json(ctx.guild.id, sanitized_username)
 
         # Update the leaderboard
+        print("Updating the leaderboard")
         leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
         upload_leaderboard(ctx.guild.id, leaderboard)
         global leaderboard_update_time
@@ -1476,7 +1536,7 @@ async def rebuild_leaderboard(ctx):
 async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
     """
     Ban command to find and display player information
-    Usage: $ban @player reason or $ban "player_name" reason
+    Usage: !ban @player reason or !ban "player_name" reason
     """
     try:
         target_user = None
@@ -1553,7 +1613,7 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
         else:
             embed.add_field(
                 name="Game Profile",
-                value="❌ No profile found\n*Player has not used `$setup_profile`*",
+                value="❌ No profile found\n*Player has not used `!setup_profile`*",
                 inline=False
             )
 
@@ -1588,4 +1648,4 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
 
 
 # Run the bot
-bot.run(os.environ['DISCORD_KEY'])
+bot.run()
