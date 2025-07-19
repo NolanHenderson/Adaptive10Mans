@@ -6,6 +6,7 @@ import random
 import re
 import time
 import math
+import glob
 from asyncio import sleep
 from itertools import combinations
 from typing import Optional, Union, List
@@ -20,9 +21,11 @@ from discord.utils import get
 from replit.object_storage import Client
 from replit.object_storage.errors import ObjectNotFoundError
 
+#from JSON_helper import *
+
 from Dis_Lookup import search_player
 
-client = Client()  # Create a client instance
+#client = Client()  # Create a client instance
 role_dict = {}
 match_size = 10
 members = []
@@ -62,6 +65,104 @@ bot = commands.Bot(command_prefix="$", case_insensitive=True, intents=intents)
 # Get Discord token from environment variable
 leaderboard_update_time = datetime.datetime.now()
 
+def upload_leaderboard(guild_id, leaderboard):
+    # Create leaderboards directory if it doesn't exist
+    os.makedirs("leaderboards", exist_ok=True)
+    # Save leaderboard to JSON file
+    leaderboard_filename = f'leaderboard_{guild_id}.json'
+    leaderboard_path = os.path.join("leaderboards", leaderboard_filename)
+    with open(leaderboard_path, 'w', encoding='utf-8') as f:
+        json.dump(leaderboard, f, indent=2, ensure_ascii=False)
+    print(f"Saved leaderboard to {leaderboard_path}")
+
+
+# Load leaderboard function
+def load_leaderboard(guild_id):
+    leaderboard_filename = f'leaderboard_{guild_id}.json'
+    leaderboard_path = os.path.join("leaderboards", leaderboard_filename)
+
+    print(f"Attempting to load leaderboard from: {leaderboard_path}")
+
+    try:
+        with open(leaderboard_path, 'r', encoding='utf-8') as f:
+            leaderboard = json.load(f)
+        return leaderboard
+    except FileNotFoundError:
+        print(f"No leaderboard found for guild {guild_id}")
+        return {}  # Return empty dict if no leaderboard exists
+    except json.JSONDecodeError as e:
+        print(f"Error parsing leaderboard JSON from {leaderboard_path}: {str(e)}")
+        return {}
+    except Exception as e:
+        print(f"Error loading leaderboard from {leaderboard_path}: {str(e)}")
+        return {}
+
+
+def list_saved_files(base_directory=".", pattern="**/*.json"):
+    """
+    List all saved JSON files recursively from the base directory.
+
+    Args:
+        base_directory (str): The root directory to search from (default: current directory)
+        pattern (str): File pattern to match (default: all JSON files recursively)
+
+    Returns:
+        list: List of file paths relative to the base directory
+    """
+    try:
+        # Get all JSON files recursively
+        search_pattern = os.path.join(base_directory, pattern)
+        files = glob.glob(search_pattern, recursive=True)
+
+        # Convert to relative paths and normalize
+        relative_files = []
+        for file in files:
+            # Make path relative to base directory
+            relative_path = os.path.relpath(file, base_directory)
+            # Normalize path separators
+            relative_path = relative_path.replace(os.sep, '/')
+            relative_files.append(relative_path)
+
+        return sorted(relative_files)
+
+    except Exception as e:
+        print(f"Error listing files: {str(e)}")
+        return []
+
+
+def list_player_data_files():
+    """
+    List all player data files specifically.
+
+    Returns:
+        list: List of player data file paths
+    """
+    return list_saved_files("player_data", "**/*.json")
+
+
+def list_leaderboard_files():
+    """
+    List all leaderboard files specifically.
+
+    Returns:
+        list: List of leaderboard file paths
+    """
+    return list_saved_files("leaderboards", "*.json")
+
+
+def list_all_saved_objects():
+    """
+    List all saved objects (both player data and leaderboards).
+
+    Returns:
+        dict: Dictionary with 'player_data' and 'leaderboards' keys containing file lists
+    """
+    return {
+        'player_data': list_player_data_files(),
+        'leaderboards': list_leaderboard_files(),
+        'all_files': list_saved_files()
+    }
+
 
 def has_permission_ctx(ctx, **options):
     """
@@ -70,43 +171,73 @@ def has_permission_ctx(ctx, **options):
     member = ctx.author
     user = ctx.author
 
+    # Debug: Print what we're checking (remove in production)
+    print(f"Checking permissions for user {user.id} ({user.name})")
+    print(f"Options: {options}")
+
     # Check if user is bot owner (highest priority)
     if options.get('bot_owner_ids') and user.id in options['bot_owner_ids']:
+        print(f"User {user.id} is bot owner")
         return True
+
+    # Check specific user IDs (moved up for higher priority)
+    if options.get('allowed_user_ids'):
+        print(f"Checking allowed_user_ids: {options['allowed_user_ids']}")
+        print(f"User ID {user.id} type: {type(user.id)}")
+
+        # Ensure we're comparing the right types
+        allowed_ids = options['allowed_user_ids']
+        if user.id in allowed_ids:
+            print(f"User {user.id} found in allowed_user_ids")
+            return True
+
+        # Also check if the ID is stored as string vs int
+        if str(user.id) in [str(uid) for uid in allowed_ids]:
+            print(f"User {user.id} found in allowed_user_ids (string comparison)")
+            return True
 
     # For guild-specific checks
     if ctx.guild and isinstance(member, discord.Member):
-        # Check if user is server admin
-        if options.get('require_admin') and member.guild_permissions.administrator:
-            return True
+        # Check if user is server admin (only if this requirement is specified)
+        if options.get('require_admin'):
+            if member.guild_permissions.administrator:
+                print(f"User {user.id} is server admin")
+                return True
 
-        # Check if user has manage server permission
-        if options.get('require_manage_server') and member.guild_permissions.manage_guild:
-            return True
+        # Check if user has manage server permission (only if this requirement is specified)
+        if options.get('require_manage_server'):
+            if member.guild_permissions.manage_guild:
+                print(f"User {user.id} has manage guild permission")
+                return True
 
         # Check specific roles
         if options.get('required_roles'):
-            if any(role.name in options['required_roles'] or role.id in options['required_roles']
-                   for role in member.roles):
-                return True
+            user_role_names = [role.name for role in member.roles]
+            user_role_ids = [role.id for role in member.roles]
+
+            print(f"User roles: {user_role_names}")
+            print(f"Required roles: {options['required_roles']}")
+
+            for required_role in options['required_roles']:
+                if required_role in user_role_names or required_role in user_role_ids:
+                    print(f"User {user.id} has required role: {required_role}")
+                    return True
 
         # Check if user has any of the specified permissions
         if options.get('required_permissions'):
             for perm_name in options['required_permissions']:
                 if hasattr(member.guild_permissions, perm_name):
                     if getattr(member.guild_permissions, perm_name):
+                        print(f"User {user.id} has required permission: {perm_name}")
                         return True
 
-    # Check specific user IDs
-    if options.get('allowed_user_ids') and user.id in options['allowed_user_ids']:
-        return True
-
+    # If no conditions are met, deny access
+    print(f"User {user.id} denied access - no conditions met")
     return False
-
 
 # Classes:
 class QView(View):
-    def __init__(self, ctx, embed_message, server_id, region, system, GID):
+    def __init__(self, ctx, embed_message, server_id, region, system, GID, gameMode):
         super().__init__(timeout=None)
         self.ctx = ctx
         self.embed_message = embed_message
@@ -134,7 +265,7 @@ class QView(View):
         return players_text
 
     @discord.ui.button(label="Join Queue", style=discord.ButtonStyle.green, custom_id="join_game")
-    async def join_game(self, interaction: discord.Interaction, button: Button):
+    async def join_game(self, interaction: discord.Interaction, gameMode):
         try:
             embed = self.embed_message.embeds[0]
             user = interaction.user
@@ -165,12 +296,17 @@ class QView(View):
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
-                members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
-                for mem in range(len(Team_1)):
-                    Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
-                for mem in range(len(Team_2)):
-                    Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
-                await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
+                if gameMode == "captains":
+                    captains, nonCaptianPlayers = pick_captains(self.ctx, roster)
+                    await asyncio.create_task(create_captains_game(self.ctx, self.GID, captains, nonCaptianPlayers))
+                    pass
+                else:
+                    members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
+                    for mem in range(len(Team_1)):
+                        Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
+                    for mem in range(len(Team_2)):
+                        Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
+                    await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
 
@@ -248,6 +384,192 @@ class QView(View):
             print(f"Error in timeout checker: {e}")
             # Restart the task if it crashes
             self.timeout_task = asyncio.create_task(self.check_queue_timeout())
+
+
+class CView(View):
+    def __init__(self, ctx, server_id, blueTeamCaptain, orangeTeamCaptain, nonCaptainPlayerList):
+        super().__init__(timeout=7200)
+        self.matchOutcomeReported = False
+        self.ctx = ctx
+        self.blueTeamCaptain = blueTeamCaptain
+        self.orangeTeamCaptain = orangeTeamCaptain
+        self.nonCaptainPlayerList = list(nonCaptainPlayerList)  # Keep as list for easier manipulation
+        self.blueTeamPlayers = [blueTeamCaptain]  # Captain starts on their team
+        self.orangeTeamPlayers = [orangeTeamCaptain]  # Captain starts on their team
+        self.server_id = server_id
+        self.blue_votes = 0
+        self.orange_votes = 0
+        self.voted_users = set()
+
+        # Picking state management
+        self.current_picker = blueTeamCaptain  # Blue captain picks first
+        self.pick_count = 0
+        self.picking_complete = False
+
+        self.refresh_buttons()
+        self.timeout_warning_task = asyncio.create_task(self.check_match_timeout())
+
+    def get_next_picker(self):
+        """Determine who picks next based on current pick count"""
+        # Standard picking order: Blue, Orange, Orange, Blue, Blue, Orange, Orange, Blue
+        # For 8 players total (6 non-captains), picks alternate with Orange getting 2 in a row in middle
+        if self.pick_count == 0:
+            return self.blueTeamCaptain
+        elif self.pick_count == 1:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 2:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 3:
+            return self.blueTeamCaptain
+        elif self.pick_count == 4:
+            return self.blueTeamCaptain
+        elif self.pick_count == 5:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 6:
+            return self.blueTeamCaptain
+        else:
+            return None  # All picks done
+
+    def refresh_buttons(self):
+        """Refresh the buttons showing available players"""
+        self.clear_items()
+
+        # Only show buttons if picking is not complete
+        if not self.picking_complete and self.nonCaptainPlayerList:
+            for i, player in enumerate(self.nonCaptainPlayerList):
+                button = discord.ui.Button(
+                    label=str(player.display_name if hasattr(player, 'display_name') else player),
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"pick_{i}"
+                )
+                button.callback = self.create_button_callback(player, i)
+                self.add_item(button)
+
+    def create_button_callback(self, player, index):
+        """Create callback function for each player button"""
+
+        async def button_callback(interaction):
+            # Check if the interaction user is the current picker
+            if interaction.user != self.current_picker:
+                await interaction.response.send_message(
+                    f"It's not your turn to pick! Waiting for {self.current_picker.display_name} to choose.",
+                    ephemeral=True
+                )
+                return
+
+            # Check if picking is complete
+            if self.picking_complete:
+                await interaction.response.send_message(
+                    "Team picking has already been completed!",
+                    ephemeral=True
+                )
+                return
+
+            # Add player to the appropriate team
+            if self.current_picker == self.blueTeamCaptain:
+                self.blueTeamPlayers.append(player)
+                team_name = "Blue Team"
+                team_color = "🔵"
+            else:
+                self.orangeTeamPlayers.append(player)
+                team_name = "Orange Team"
+                team_color = "🟠"
+
+            # Remove player from available list
+            self.nonCaptainPlayerList.remove(player)
+            self.pick_count += 1
+
+            # Check if picking is complete
+            if not self.nonCaptainPlayerList or self.pick_count >= 6:
+                self.picking_complete = True
+                # If there's one player left, add them to the team with fewer players
+                if self.nonCaptainPlayerList:
+                    last_player = self.nonCaptainPlayerList[0]
+                    if len(self.blueTeamPlayers) < len(self.orangeTeamPlayers):
+                        self.blueTeamPlayers.append(last_player)
+                    else:
+                        self.orangeTeamPlayers.append(last_player)
+                    self.nonCaptainPlayerList.clear()
+            else:
+                # Set next picker
+                self.current_picker = self.get_next_picker()
+
+            # Update the embed and buttons
+            embed = self.create_updated_embed()
+            self.refresh_buttons()
+
+            # Response message
+            if self.picking_complete:
+                response_msg = f"{team_color} {interaction.user.display_name} picked {player.display_name}!\n✅ **Team picking complete!**"
+            else:
+                next_picker_name = self.current_picker.display_name if self.current_picker else "Unknown"
+                response_msg = f"{team_color} {interaction.user.display_name} picked {player.display_name}!\n➡️ Next pick: {next_picker_name}"
+
+            await interaction.response.edit_message(
+                content=response_msg,
+                embed=embed,
+                view=self if not self.picking_complete else None
+            )
+
+        return button_callback
+
+    def create_updated_embed(self):
+        """Create updated embed with current team compositions"""
+        embed = discord.Embed(title="⚽ Team Selection", color=0x00ff00)
+
+        # Add match info if available
+        if hasattr(self, 'match_id'):
+            embed.add_field(name="🆔 Match ID", value=str(self.match_id), inline=False)
+
+        # Current picker info
+        if not self.picking_complete and self.current_picker:
+            embed.add_field(
+                name="🎯 Current Picker",
+                value=f"{self.current_picker.mention} ({self.pick_count + 1}/{len(self.nonCaptainPlayerList) + self.pick_count})",
+                inline=False
+            )
+
+        # Blue team
+        blue_team_str = "\n".join([f"👤 {member.mention}" for member in self.blueTeamPlayers])
+        if not blue_team_str:
+            blue_team_str = "No players yet"
+        embed.add_field(name="🔵 Blue Team", value=blue_team_str, inline=True)
+
+        # Orange team
+        orange_team_str = "\n".join([f"👤 {member.mention}" for member in self.orangeTeamPlayers])
+        if not orange_team_str:
+            orange_team_str = "No players yet"
+        embed.add_field(name="🟠 Orange Team", value=orange_team_str, inline=True)
+
+        # Available players
+        if self.nonCaptainPlayerList and not self.picking_complete:
+            available_str = "\n".join([f"• {player.display_name}" for player in self.nonCaptainPlayerList])
+            embed.add_field(name="⏳ Available Players", value=available_str, inline=False)
+        elif self.picking_complete:
+            embed.add_field(name="✅ Status", value="Team selection complete!", inline=False)
+
+        return embed
+
+    async def check_match_timeout(self):
+        """Handle timeout warning (implement as needed)"""
+        # Placeholder for timeout handling
+        pass
+
+    async def on_timeout(self):
+        """Called when the view times out"""
+        self.picking_complete = True
+        self.clear_items()
+
+        # You can update the message here to show timeout
+        try:
+            embed = self.create_updated_embed()
+            embed.color = 0xff0000  # Red for timeout
+            embed.add_field(name="⏰ Timeout", value="Team picking has timed out!", inline=False)
+
+            # This would need the message object to edit
+            # await self.message.edit(embed=embed, view=None)
+        except:
+            pass
 
 
 class LView(View):
@@ -388,7 +710,7 @@ class LView(View):
         """Automatically update the leaderboard after match completion"""
         try:
             leaderboard = get_sorted_leaderboard()
-            client.upload_from_text('leaderboard', json.dumps(leaderboard))
+            upload_leaderboard(self.ctx.guild.id, leaderboard)
             leaderboard_update_time = datetime.datetime.now()
             print("Leaderboard automatically updated after match completion")
         except Exception as e:
@@ -397,7 +719,7 @@ class LView(View):
 
 # Command to create a new LFG queue with the updated QView
 @bot.command()
-async def lfg(ctx, region, system):  # Removed interaction parameter
+async def lfg(ctx, region, system, gameMode):  # Removed interaction parameter
     permission_options = {
         'require_admin': False,
         'allowed_user_ids': [210840914858344448],
@@ -410,6 +732,7 @@ async def lfg(ctx, region, system):  # Removed interaction parameter
         await ctx.send("You need staff permissions to use this command.")
         return
 
+    gameMode = gameMode.lower()
     GID = generate_match_id()
     if system.upper() == "PC":
         syscolor = discord.Color.dark_red()
@@ -428,7 +751,7 @@ async def lfg(ctx, region, system):  # Removed interaction parameter
     embed.set_footer(text=f"Game ID: {GID}")
 
     message = await ctx.send(embed=embed)
-    view = QView(ctx, message, ctx.guild.id, region, system, GID)
+    view = QView(ctx, message, ctx.guild.id, region, system, GID, gameMode)
     await message.edit(view=view)
 
 
@@ -446,16 +769,19 @@ class Player:
         self.system = system
 
     def to_dict(self):
-        """Convert the Player instance to a dictionary."""
+        return self.__dict__
+
+    @staticmethod
+    def default(dis_name):
         return {
-            'ubi_name': self.ubi_name,
-            'dis_name': self.dis_name,
-            'elo': self.elo,
-            'wins': self.wins,
-            'losses': self.losses,
-            'rank': self.rank,
-            'region': self.region,
-            'system': self.system
+            'ubi_name': "unknown",
+            'dis_name': dis_name,
+            'elo': 1000,
+            'wins': 0,
+            'losses': 0,
+            'rank': "Null",
+            'region': "Null",
+            'system': "Null"
         }
 
     @classmethod
@@ -474,34 +800,77 @@ class Player:
     def sanitize_filename(cls, filename):
         if not isinstance(filename, str):
             filename = filename.dis_name
-            # raise ValueError("filename must be a string")
-        return filename.strip().replace(" ", "_").replace(".", "_")
+        # Replace invalid characters with underscores
+        filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+        # Replace spaces and periods with underscores
+        filename = filename.strip().replace(" ", "_").replace(".", "_")
+        # Avoid empty filename
+        if not filename:
+            raise ValueError("Filename cannot be empty after sanitization.")
+        return filename
 
     def save_to_json(self, filename, username):
         file_safe_name = self.sanitize_filename(username)
-        key = f"player_data/{filename}/{file_safe_name}.json"
-        client.upload_from_text(key, json.dumps(self.to_dict()))
-        print(f"Saved player data to object storage as {key}")
+        # Create directory structure if it doesn't exist
+        directory = f"player_data/{filename}"
+        os.makedirs(directory, exist_ok=True)
+        # Create full file path
+        file_path = os.path.join(directory, f"{file_safe_name}.json")
+        # Write JSON data to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+        print(f"Saved player data to {file_path}")
 
     @classmethod
     def load_from_json(cls, filename, username):
         file_safe_name = cls.sanitize_filename(username)
-        key = f"player_data/{filename}/{file_safe_name}.json"
-
-        print(f"Attempting to download player data for key: {key}")
+        file_path = os.path.join("player_data", str(filename), f"{file_safe_name}.json")
+        print(f"Attempting to load player data from: {file_path}")
 
         try:
-            data = client.download_as_text(key)
-            return cls.from_dict(json.loads(data))
-        except client.ObjectNotFoundError:
-            print(f"No data found for {key}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return cls.from_dict(data)
+        except FileNotFoundError:
+            print(f"No data found for {file_path}")
+            print(f"Creating default player data for {username}")
+
+            # Create a default player instance
+            default_data = cls.default(username)
+            default_player = cls.from_dict(default_data)
+
+            # Save the default player data
+            default_player.save_to_json(filename, username)
+
+            return default_player
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON from {file_path}: {str(e)}")
             return None
         except Exception as e:
-            print(f"Error downloading player data for {key}: {str(e)}")
+            print(f"Error loading player data from {file_path}: {str(e)}")
             return None
 
-
 # Functions:
+async def create_captains_game(ctx, GID, captains:list, nonCaptainPlayers:list):
+    blueTeam = []
+    orangeTeam = []
+    embed = discord.Embed(title="Match Information", color = 0x00ff00)
+    embed.add_field(name="Match ID", value=str(GID), inline=False)
+
+    blueTeam_str = "\n".join(mem.mention for mem in blueTeam)
+    orangeTeam_str = "\n".join(mem.mention for mem in orangeTeam)
+    embed.add_field(name="Blue Team", value=blueTeam_str, inline=True)
+    embed.add_field(name="Orange Team", value=orangeTeam_str, inline=True)
+
+    view = CView(ctx = ctx,
+                 server_id=ctx.guild.id,
+                 blueTeamCaptain=captains[0],
+                 orangeTeamCaptain=captains[1],
+                 nonCaptainPlayerList=nonCaptainPlayers)
+    await create_match_channels(ctx, blueTeam, orangeTeam, GID[-4:], 7200,
+                                embed, view)
+
+
 # Creates the blurb containing all match info in a new lobby
 async def match_info(ctx, match_id, Team_1, Team_2, elo_scale):
     team_1_members = Team_1
@@ -568,6 +937,20 @@ def check_profile(filename, user):
 def generate_match_id():
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
+def pick_captains(ctx, roster):
+    allPlayersInLobby = []
+    captains = []
+    for dis in roster:
+        try:
+            player = Player.load_from_json(ctx.guild.id, dis)
+            allPlayersInLobby.append(player)
+        except (ObjectNotFoundError, json.JSONDecodeError):
+            print(f"Error loading player data for {dis}.")
+    captains.append(random.choice(allPlayersInLobby))
+    allPlayersInLobby.remove(captains[0])
+    captains.append(random.choice(allPlayersInLobby))
+    allPlayersInLobby.remove(captains[1])
+    return captains, allPlayersInLobby # now only 8 players, missing both captains
 
 # Finds the most even match mathematically based on elo
 def best_team_partition(players, match_size):
@@ -694,7 +1077,7 @@ def load_all_players():
     unsorted_leaderboard = {}
 
     # Get all files from object storage
-    player_list = client.list()
+    player_list = list_player_data_files()
     print(f"Total files found: {len(player_list)}")
 
     # Filter for player_data files only (remove the problematic [2:] slice)
@@ -731,12 +1114,12 @@ def load_players_for_server(server_id):
     unsorted_leaderboard = {}
 
     # Get all files from object storage
-    player_list = client.list()
+    player_list = list_player_data_files()
 
     # Filter for current server's player data files
     server_player_files = [
         item for item in player_list
-        if item.name.startswith(f'player_data/{server_id}/')
+        if item.startswith(f'{server_id}/')  # item is already a string path
     ]
 
     print(f"Found {len(server_player_files)} player files for server {server_id}")
@@ -746,8 +1129,9 @@ def load_players_for_server(server_id):
 
     for player_file in server_player_files:
         try:
-            # Extract username from path: player_data/server_id/username.json
-            username = player_file.name.split('/')[-1].split('.')[0]
+            # Extract username from path: server_id/username.json
+            # player_file is a string like "server_id/username.json"
+            username = player_file.split('/')[-1].split('.')[0]
 
             player = Player.load_from_json(filename=str(server_id), username=username)
             if player and hasattr(player, 'dis_name') and hasattr(player, 'elo'):
@@ -757,7 +1141,7 @@ def load_players_for_server(server_id):
                 print(f"Invalid player data for {username}")
                 failed_loads += 1
         except Exception as e:
-            print(f"Failed to load player from {player_file.name}: {str(e)}")
+            print(f"Failed to load player from {player_file}: {str(e)}")
             failed_loads += 1
 
     print(f"Server {server_id} - Successfully loaded: {successful_loads}, Failed: {failed_loads}")
@@ -957,15 +1341,13 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
     try:
         # Try server-specific leaderboard first
-        leaderboard_key = f'leaderboard_{ctx.guild.id}'
         try:
-            leaderboard = client.download_as_text(leaderboard_key)
-            leaderboard = json.loads(leaderboard)
+            leaderboard = load_leaderboard(ctx.guild.id)
         except:
             # Fall back to global leaderboard or create new one
             print("Server-specific leaderboard not found, creating new one...")
             leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
-            client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+            upload_leaderboard(ctx.guild.id, leaderboard)
 
     except Exception as e:
         await ctx.send("❌ Error loading leaderboard data.")
@@ -1062,7 +1444,7 @@ async def leaderboard(ctx, arg: Union[int, str] = 1):
 
     # Add navigation hints
     if total_pages > 1:
-        nav_text = f"Use `$leaderboard {page - 1 if page > 1 else page}` or `$leaderboard {page + 1 if page < total_pages else page}` to navigate"
+        nav_text = f"Use `!leaderboard {page - 1 if page > 1 else page}` or `!leaderboard {page + 1 if page < total_pages else page}` to navigate"
         embed.set_footer(text=nav_text)
 
     await ctx.send(embed=embed)
@@ -1081,17 +1463,18 @@ async def make_leaderboard(ctx):
     if not has_permission_ctx(ctx, **permission_options):
         await ctx.send("You need staff permissions to use this command.")
         return
-
     await ctx.send("🔄 Creating leaderboard...")
 
     # Use server-specific leaderboard
+    print("Getting sorted leaderboard")
     leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
 
     # Store with server-specific key
-    leaderboard_key = f'leaderboard_{ctx.guild.id}'
-    client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+    print("Saving sorted leaderboard to database")
+    upload_leaderboard(ctx.guild.id, leaderboard)
 
     global leaderboard_update_time
+    print("Getting timestamp")
     leaderboard_update_time = datetime.datetime.now()
 
     embed = discord.Embed(title="Leaderboard Updated ✅", color=discord.Color.green())
@@ -1120,17 +1503,21 @@ async def DataBase(ctx):
 async def adjust_elo(ctx, user: discord.Member, amount: int):
     """
     Manually adjust a player's ELO and update the leaderboard
-    Usage: $adjust_elo @player +50 or $adjust_elo @player -25
+    Usage: !adjust_elo @player +50 or !adjust_elo @player -25
     """
+    print(f"Attempting to adjust elo for {user.name}")
     try:
         # Use sanitized filename to match how the data is stored
+        print("sanitizing name")
         sanitized_username = Player.sanitize_filename(user.name)
 
         # Load the player's profile using the sanitized name
+        print("Trying to load player data from JSON")
         player = Player.load_from_json(ctx.guild.id, sanitized_username)
-
+        print("Loaded data:")
+        print(player)
         if player is None:
-            await ctx.send(f"❌ No profile found for {user.display_name}. They need to use `$setup_profile` first.")
+            await ctx.send(f"❌ No profile found for {user.display_name}. They need to use `!setup_profile` first.")
             return
 
         # Store old ELO for comparison
@@ -1144,12 +1531,13 @@ async def adjust_elo(ctx, user: discord.Member, amount: int):
             player.elo = 0
 
         # Save the updated player data using the sanitized name
+        print("saving new value to database")
         player.save_to_json(ctx.guild.id, sanitized_username)
 
         # Update the leaderboard
+        print("Updating the leaderboard")
         leaderboard = get_sorted_leaderboard(server_id=ctx.guild.id)
-        leaderboard_key = f'leaderboard_{ctx.guild.id}'
-        client.upload_from_text(leaderboard_key, json.dumps(leaderboard))
+        upload_leaderboard(ctx.guild.id, leaderboard)
         global leaderboard_update_time
         leaderboard_update_time = datetime.datetime.now()
 
@@ -1179,8 +1567,8 @@ async def debug_players(ctx):
     """Debug command to check how many players are actually stored"""
     try:
         # Get raw player list from object storage
-        player_list = client.list()
-        print(f"Raw client.list() result: {player_list}")
+        player_list = list_player_data_files()
+        print(f"Raw player list result: {player_list}")
 
         # Filter for player data files
         player_files = [item for item in player_list if item.name.startswith('player_data/')]
@@ -1223,7 +1611,7 @@ async def debug_leaderboard(ctx):
 
         # Step 1: Check stored leaderboard
         try:
-            stored_leaderboard = client.download_as_text('leaderboard')
+            stored_leaderboard = load_leaderboard(ctx.guild.id)
             stored_data = json.loads(stored_leaderboard)
             embed.add_field(name="Stored Leaderboard Players",
                             value=str(len(stored_data)), inline=True)
@@ -1273,7 +1661,7 @@ async def debug_load_process(ctx):
         new_player_list = []
 
         # Step 1: Get player list
-        player_list = client.list()
+        player_list = list_player_data_files()
         embed.add_field(name="1. Total Files", value=str(len(player_list)), inline=True)
 
         # Step 2: Filter and process
@@ -1346,7 +1734,7 @@ async def rebuild_leaderboard(ctx):
         )
 
         # Save it
-        client.upload_from_text('leaderboard', json.dumps(sorted_leaderboard))
+        upload_leaderboard(ctx.guild.id, sorted_leaderboard)
         global leaderboard_update_time
         leaderboard_update_time = datetime.datetime.now()
 
@@ -1374,7 +1762,7 @@ async def rebuild_leaderboard(ctx):
 async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
     """
     Ban command to find and display player information
-    Usage: $ban @player reason or $ban "player_name" reason
+    Usage: !ban @player reason or !ban "player_name" reason
     """
     try:
         target_user = None
@@ -1451,7 +1839,7 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
         else:
             embed.add_field(
                 name="Game Profile",
-                value="❌ No profile found\n*Player has not used `$setup_profile`*",
+                value="❌ No profile found\n*Player has not used `!setup_profile`*",
                 inline=False
             )
 
@@ -1486,3 +1874,4 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
 
 
 # Run the bot
+bot.run()
