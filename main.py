@@ -385,6 +385,7 @@ class QView(View):
             # Restart the task if it crashes
             self.timeout_task = asyncio.create_task(self.check_queue_timeout())
 
+
 class CView(View):
     def __init__(self, ctx, server_id, blueTeamCaptain, orangeTeamCaptain, nonCaptainPlayerList):
         super().__init__(timeout=7200)
@@ -392,33 +393,183 @@ class CView(View):
         self.ctx = ctx
         self.blueTeamCaptain = blueTeamCaptain
         self.orangeTeamCaptain = orangeTeamCaptain
-        self.nonCaptainPlayerList = nonCaptainPlayerList
-        self.blueTeamPlayers = set()
-        self.orangeTeamPlayers = set()
+        self.nonCaptainPlayerList = list(nonCaptainPlayerList)  # Keep as list for easier manipulation
+        self.blueTeamPlayers = [blueTeamCaptain]  # Captain starts on their team
+        self.orangeTeamPlayers = [orangeTeamCaptain]  # Captain starts on their team
         self.server_id = server_id
         self.blue_votes = 0
         self.orange_votes = 0
         self.voted_users = set()
-        self.timeout_warning_task = asyncio.create_task(self.check_match_timeout()) # Need to add this
+
+        # Picking state management
+        self.current_picker = blueTeamCaptain  # Blue captain picks first
+        self.pick_count = 0
+        self.picking_complete = False
+
+        self.refresh_buttons()
+        self.timeout_warning_task = asyncio.create_task(self.check_match_timeout())
+
+    def get_next_picker(self):
+        """Determine who picks next based on current pick count"""
+        # Standard picking order: Blue, Orange, Orange, Blue, Blue, Orange, Orange, Blue
+        # For 8 players total (6 non-captains), picks alternate with Orange getting 2 in a row in middle
+        if self.pick_count == 0:
+            return self.blueTeamCaptain
+        elif self.pick_count == 1:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 2:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 3:
+            return self.blueTeamCaptain
+        elif self.pick_count == 4:
+            return self.blueTeamCaptain
+        elif self.pick_count == 5:
+            return self.orangeTeamCaptain
+        elif self.pick_count == 6:
+            return self.blueTeamCaptain
+        else:
+            return None  # All picks done
 
     def refresh_buttons(self):
+        """Refresh the buttons showing available players"""
         self.clear_items()
-        for i, playerName in enumerate(self.nonCaptainPlayerList):
-            button = discord.ui.Button(
-                label = str(playerName),
-                style = discord.ButtonStyle.primary,
-                custom_id=f"button_{i}"
-            )
-            button.callback = self.create_button_callback(playerName, i)
-            self.add_item(button)
 
-    def create_button_Callback(selfself, playerName):
+        # Only show buttons if picking is not complete
+        if not self.picking_complete and self.nonCaptainPlayerList:
+            for i, player in enumerate(self.nonCaptainPlayerList):
+                button = discord.ui.Button(
+                    label=str(player.display_name if hasattr(player, 'display_name') else player),
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"pick_{i}"
+                )
+                button.callback = self.create_button_callback(player, i)
+                self.add_item(button)
+
+    def create_button_callback(self, player, index):
+        """Create callback function for each player button"""
+
         async def button_callback(interaction):
-            await interaction.response.send_message(
-                f"You selected {playerName}",
-                ephemeral=True
+            # Check if the interaction user is the current picker
+            if interaction.user != self.current_picker:
+                await interaction.response.send_message(
+                    f"It's not your turn to pick! Waiting for {self.current_picker.display_name} to choose.",
+                    ephemeral=True
+                )
+                return
+
+            # Check if picking is complete
+            if self.picking_complete:
+                await interaction.response.send_message(
+                    "Team picking has already been completed!",
+                    ephemeral=True
+                )
+                return
+
+            # Add player to the appropriate team
+            if self.current_picker == self.blueTeamCaptain:
+                self.blueTeamPlayers.append(player)
+                team_name = "Blue Team"
+                team_color = "🔵"
+            else:
+                self.orangeTeamPlayers.append(player)
+                team_name = "Orange Team"
+                team_color = "🟠"
+
+            # Remove player from available list
+            self.nonCaptainPlayerList.remove(player)
+            self.pick_count += 1
+
+            # Check if picking is complete
+            if not self.nonCaptainPlayerList or self.pick_count >= 6:
+                self.picking_complete = True
+                # If there's one player left, add them to the team with fewer players
+                if self.nonCaptainPlayerList:
+                    last_player = self.nonCaptainPlayerList[0]
+                    if len(self.blueTeamPlayers) < len(self.orangeTeamPlayers):
+                        self.blueTeamPlayers.append(last_player)
+                    else:
+                        self.orangeTeamPlayers.append(last_player)
+                    self.nonCaptainPlayerList.clear()
+            else:
+                # Set next picker
+                self.current_picker = self.get_next_picker()
+
+            # Update the embed and buttons
+            embed = self.create_updated_embed()
+            self.refresh_buttons()
+
+            # Response message
+            if self.picking_complete:
+                response_msg = f"{team_color} {interaction.user.display_name} picked {player.display_name}!\n✅ **Team picking complete!**"
+            else:
+                next_picker_name = self.current_picker.display_name if self.current_picker else "Unknown"
+                response_msg = f"{team_color} {interaction.user.display_name} picked {player.display_name}!\n➡️ Next pick: {next_picker_name}"
+
+            await interaction.response.edit_message(
+                content=response_msg,
+                embed=embed,
+                view=self if not self.picking_complete else None
             )
+
         return button_callback
+
+    def create_updated_embed(self):
+        """Create updated embed with current team compositions"""
+        embed = discord.Embed(title="⚽ Team Selection", color=0x00ff00)
+
+        # Add match info if available
+        if hasattr(self, 'match_id'):
+            embed.add_field(name="🆔 Match ID", value=str(self.match_id), inline=False)
+
+        # Current picker info
+        if not self.picking_complete and self.current_picker:
+            embed.add_field(
+                name="🎯 Current Picker",
+                value=f"{self.current_picker.mention} ({self.pick_count + 1}/{len(self.nonCaptainPlayerList) + self.pick_count})",
+                inline=False
+            )
+
+        # Blue team
+        blue_team_str = "\n".join([f"👤 {member.mention}" for member in self.blueTeamPlayers])
+        if not blue_team_str:
+            blue_team_str = "No players yet"
+        embed.add_field(name="🔵 Blue Team", value=blue_team_str, inline=True)
+
+        # Orange team
+        orange_team_str = "\n".join([f"👤 {member.mention}" for member in self.orangeTeamPlayers])
+        if not orange_team_str:
+            orange_team_str = "No players yet"
+        embed.add_field(name="🟠 Orange Team", value=orange_team_str, inline=True)
+
+        # Available players
+        if self.nonCaptainPlayerList and not self.picking_complete:
+            available_str = "\n".join([f"• {player.display_name}" for player in self.nonCaptainPlayerList])
+            embed.add_field(name="⏳ Available Players", value=available_str, inline=False)
+        elif self.picking_complete:
+            embed.add_field(name="✅ Status", value="Team selection complete!", inline=False)
+
+        return embed
+
+    async def check_match_timeout(self):
+        """Handle timeout warning (implement as needed)"""
+        # Placeholder for timeout handling
+        pass
+
+    async def on_timeout(self):
+        """Called when the view times out"""
+        self.picking_complete = True
+        self.clear_items()
+
+        # You can update the message here to show timeout
+        try:
+            embed = self.create_updated_embed()
+            embed.color = 0xff0000  # Red for timeout
+            embed.add_field(name="⏰ Timeout", value="Team picking has timed out!", inline=False)
+
+            # This would need the message object to edit
+            # await self.message.edit(embed=embed, view=None)
+        except:
+            pass
 
 
 class LView(View):
