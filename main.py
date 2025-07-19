@@ -237,7 +237,7 @@ def has_permission_ctx(ctx, **options):
 
 # Classes:
 class QView(View):
-    def __init__(self, ctx, embed_message, server_id, region, system, GID):
+    def __init__(self, ctx, embed_message, server_id, region, system, GID, gameMode):
         super().__init__(timeout=None)
         self.ctx = ctx
         self.embed_message = embed_message
@@ -265,7 +265,7 @@ class QView(View):
         return players_text
 
     @discord.ui.button(label="Join Queue", style=discord.ButtonStyle.green, custom_id="join_game")
-    async def join_game(self, interaction: discord.Interaction, button: Button):
+    async def join_game(self, interaction: discord.Interaction, gameMode):
         try:
             embed = self.embed_message.embeds[0]
             user = interaction.user
@@ -296,12 +296,17 @@ class QView(View):
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
-                members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
-                for mem in range(len(Team_1)):
-                    Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
-                for mem in range(len(Team_2)):
-                    Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
-                await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
+                if gameMode == "captains":
+                    captains, nonCaptianPlayers = pick_captains(self.ctx, roster)
+                    await asyncio.create_task(create_captains_game(self.ctx, self.GID, captains, nonCaptianPlayers))
+                    pass
+                else:
+                    members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
+                    for mem in range(len(Team_1)):
+                        Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
+                    for mem in range(len(Team_2)):
+                        Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
+                    await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
 
@@ -379,6 +384,41 @@ class QView(View):
             print(f"Error in timeout checker: {e}")
             # Restart the task if it crashes
             self.timeout_task = asyncio.create_task(self.check_queue_timeout())
+
+class CView(View):
+    def __init__(self, ctx, server_id, blueTeamCaptain, orangeTeamCaptain, nonCaptainPlayerList):
+        super().__init__(timeout=7200)
+        self.matchOutcomeReported = False
+        self.ctx = ctx
+        self.blueTeamCaptain = blueTeamCaptain
+        self.orangeTeamCaptain = orangeTeamCaptain
+        self.nonCaptainPlayerList = nonCaptainPlayerList
+        self.blueTeamPlayers = set()
+        self.orangeTeamPlayers = set()
+        self.server_id = server_id
+        self.blue_votes = 0
+        self.orange_votes = 0
+        self.voted_users = set()
+        self.timeout_warning_task = asyncio.create_task(self.check_match_timeout()) # Need to add this
+
+    def refresh_buttons(self):
+        self.clear_items()
+        for i, playerName in enumerate(self.nonCaptainPlayerList):
+            button = discord.ui.Button(
+                label = str(playerName),
+                style = discord.ButtonStyle.primary,
+                custom_id=f"button_{i}"
+            )
+            button.callback = self.create_button_callback(playerName, i)
+            self.add_item(button)
+
+    def create_button_Callback(selfself, playerName):
+        async def button_callback(interaction):
+            await interaction.response.send_message(
+                f"You selected {playerName}",
+                ephemeral=True
+            )
+        return button_callback
 
 
 class LView(View):
@@ -528,7 +568,7 @@ class LView(View):
 
 # Command to create a new LFG queue with the updated QView
 @bot.command()
-async def lfg(ctx, region, system):  # Removed interaction parameter
+async def lfg(ctx, region, system, gameMode):  # Removed interaction parameter
     permission_options = {
         'require_admin': False,
         'allowed_user_ids': [210840914858344448],
@@ -541,6 +581,7 @@ async def lfg(ctx, region, system):  # Removed interaction parameter
         await ctx.send("You need staff permissions to use this command.")
         return
 
+    gameMode = gameMode.lower()
     GID = generate_match_id()
     if system.upper() == "PC":
         syscolor = discord.Color.dark_red()
@@ -559,7 +600,7 @@ async def lfg(ctx, region, system):  # Removed interaction parameter
     embed.set_footer(text=f"Game ID: {GID}")
 
     message = await ctx.send(embed=embed)
-    view = QView(ctx, message, ctx.guild.id, region, system, GID)
+    view = QView(ctx, message, ctx.guild.id, region, system, GID, gameMode)
     await message.edit(view=view)
 
 
@@ -659,6 +700,26 @@ class Player:
             return None
 
 # Functions:
+async def create_captains_game(ctx, GID, captains:list, nonCaptainPlayers:list):
+    blueTeam = []
+    orangeTeam = []
+    embed = discord.Embed(title="Match Information", color = 0x00ff00)
+    embed.add_field(name="Match ID", value=str(GID), inline=False)
+
+    blueTeam_str = "\n".join(mem.mention for mem in blueTeam)
+    orangeTeam_str = "\n".join(mem.mention for mem in orangeTeam)
+    embed.add_field(name="Blue Team", value=blueTeam_str, inline=True)
+    embed.add_field(name="Orange Team", value=orangeTeam_str, inline=True)
+
+    view = CView(ctx = ctx,
+                 server_id=ctx.guild.id,
+                 blueTeamCaptain=captains[0],
+                 orangeTeamCaptain=captains[1],
+                 nonCaptainPlayerList=nonCaptainPlayers)
+    await create_match_channels(ctx, blueTeam, orangeTeam, GID[-4:], 7200,
+                                embed, view)
+
+
 # Creates the blurb containing all match info in a new lobby
 async def match_info(ctx, match_id, Team_1, Team_2, elo_scale):
     team_1_members = Team_1
@@ -725,6 +786,20 @@ def check_profile(filename, user):
 def generate_match_id():
     return f"{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
 
+def pick_captains(ctx, roster):
+    allPlayersInLobby = []
+    captains = []
+    for dis in roster:
+        try:
+            player = Player.load_from_json(ctx.guild.id, dis)
+            allPlayersInLobby.append(player)
+        except (ObjectNotFoundError, json.JSONDecodeError):
+            print(f"Error loading player data for {dis}.")
+    captains.append(random.choice(allPlayersInLobby))
+    allPlayersInLobby.remove(captains[0])
+    captains.append(random.choice(allPlayersInLobby))
+    allPlayersInLobby.remove(captains[1])
+    return captains, allPlayersInLobby # now only 8 players, missing both captains
 
 # Finds the most even match mathematically based on elo
 def best_team_partition(players, match_size):
