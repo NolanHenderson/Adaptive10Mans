@@ -237,7 +237,7 @@ def has_permission_ctx(ctx, **options):
 
 # Classes:
 class QView(View):
-    def __init__(self, ctx, embed_message, server_id, region, system, GID, gameMode):
+    def __init__(self, ctx, embed_message, server_id, region, system, GID):
         super().__init__(timeout=None)
         self.ctx = ctx
         self.embed_message = embed_message
@@ -296,17 +296,8 @@ class QView(View):
                 self.update_players_field(embed)
                 await self.embed_message.edit(embed=embed)
                 print(roster)
-                if gameMode == "captains":
-                    captains, nonCaptianPlayers = pick_captains(self.ctx, roster)
-                    await asyncio.create_task(create_captains_game(self.ctx, self.GID, captains, nonCaptianPlayers))
-                    pass
-                else:
-                    members, Team_1, Team_2, Discarded, elo_scale = make_a_match(self.ctx, roster, self.server_id)
-                    for mem in range(len(Team_1)):
-                        Team_1[mem] = discord.utils.get(self.ctx.guild.members, name=Team_1[mem].dis_name)
-                    for mem in range(len(Team_2)):
-                        Team_2[mem] = discord.utils.get(self.ctx.guild.members, name=Team_2[mem].dis_name)
-                    await asyncio.create_task(match_info(self.ctx, self.GID, Team_1, Team_2, elo_scale))
+                captains, nonCaptianPlayers = pick_captains(self.ctx, roster)
+                await asyncio.create_task(create_captains_game(self.ctx, self.GID, captains, nonCaptianPlayers))
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {str(e)}", ephemeral=True)
 
@@ -719,7 +710,7 @@ class LView(View):
 
 # Command to create a new LFG queue with the updated QView
 @bot.command()
-async def lfg(ctx, region, system, gameMode):  # Removed interaction parameter
+async def lfg(ctx, region, system):  # Removed interaction parameter
     permission_options = {
         'require_admin': False,
         'allowed_user_ids': [210840914858344448],
@@ -732,7 +723,6 @@ async def lfg(ctx, region, system, gameMode):  # Removed interaction parameter
         await ctx.send("You need staff permissions to use this command.")
         return
 
-    gameMode = gameMode.lower()
     GID = generate_match_id()
     if system.upper() == "PC":
         syscolor = discord.Color.dark_red()
@@ -751,7 +741,7 @@ async def lfg(ctx, region, system, gameMode):  # Removed interaction parameter
     embed.set_footer(text=f"Game ID: {GID}")
 
     message = await ctx.send(embed=embed)
-    view = QView(ctx, message, ctx.guild.id, region, system, GID, gameMode)
+    view = QView(ctx, message, ctx.guild.id, region, system, GID)
     await message.edit(view=view)
 
 
