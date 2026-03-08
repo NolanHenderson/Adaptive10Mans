@@ -1864,4 +1864,6 @@ async def ban_player(ctx, player_identifier, *, reason="No reason provided"):
 
 
 # Run the bot
-bot.run()
+bot.run("")
+
+#
